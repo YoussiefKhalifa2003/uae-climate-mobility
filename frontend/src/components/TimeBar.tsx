@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore, getCurrentUAEHour, getMaxSelectableUAEHour, snapUAEHour } from "../store/useStore";
 
 function fmtHour(h: number): string {
@@ -28,7 +28,8 @@ export default function TimeBar() {
   const layerSyncAt = useStore((s) => s.layerSyncAt);
   const env = useStore((s) => s.env);
   const togglePlay = useStore((s) => s.togglePlay);
-  const refreshAllLayers = useStore((s) => s.refreshAllLayers);
+  const setHourLight = useStore((s) => s.setHourLight);
+  const scheduleLayerRefresh = useStore((s) => s.scheduleLayerRefresh);
   const syncToNow = useStore((s) => s.syncToNow);
   const counterfactual = useStore((s) => s.counterfactual);
   const layers = useStore((s) => s.layers);
@@ -36,9 +37,13 @@ export default function TimeBar() {
   const interventionEdgeUids = useStore((s) => s.interventionEdgeUids);
   const [, clockTick] = useState(0);
 
+  const [dragHour, setDragHour] = useState<number | null>(null);
+  const dragging = useRef(false);
+
   const maxHour = getMaxSelectableUAEHour();
-  const atLiveEdge = hour >= maxHour - 0.01;
-  const displayHour = playing && atLiveEdge ? getCurrentUAEHour() : hour;
+  const sliderHour = dragHour ?? hour;
+  const atLiveEdge = sliderHour >= maxHour - 0.01;
+  const displayHour = playing && atLiveEdge && !dragging.current ? getCurrentUAEHour() : sliderHour;
   const live = isNearNow(displayHour);
 
   useEffect(() => {
@@ -47,10 +52,26 @@ export default function TimeBar() {
     return () => clearInterval(id);
   }, [playing]);
 
+  const onSliderInput = (raw: number) => {
+    const h = snapUAEHour(raw);
+    setDragHour(h);
+    setHourLight(h);
+    scheduleLayerRefresh(h);
+  };
+
+  const onSliderCommit = (raw: number) => {
+    const h = snapUAEHour(raw);
+    setDragHour(null);
+    dragging.current = false;
+    setHourLight(h);
+    scheduleLayerRefresh(h, { immediate: true });
+  };
+
   return (
     <div className="absolute bottom-3 left-1/2 z-10 w-[min(640px,92vw)] -translate-x-1/2 rounded-xl border border-edge bg-panel/90 px-3 py-2 shadow-xl backdrop-blur">
       <div className="mb-1 flex items-center gap-3">
         <button
+          type="button"
           onClick={togglePlay}
           className="shrink-0 rounded-lg bg-accent2 px-2.5 py-1 text-[11px] font-semibold text-ink hover:opacity-90"
         >
@@ -66,7 +87,7 @@ export default function TimeBar() {
               </span>
             )}
           </div>
-          {playing && (
+          {(playing || dragging.current) && (
             <span className="text-[8px] text-slate-500">
               Layers {syncAgeLabel(layerSyncAt)}
               {env?.air_temp_c != null && (
@@ -83,12 +104,22 @@ export default function TimeBar() {
           min={0}
           max={maxHour}
           step={0.5}
-          value={Math.min(hour, maxHour)}
-          onChange={(e) => void refreshAllLayers(snapUAEHour(parseFloat(e.target.value)))}
+          value={Math.min(sliderHour, maxHour)}
+          onPointerDown={() => {
+            dragging.current = true;
+            if (playing) useStore.setState({ playing: false });
+          }}
+          onPointerUp={(e) => onSliderCommit(parseFloat(e.currentTarget.value))}
+          onPointerCancel={() => {
+            dragging.current = false;
+            setDragHour(null);
+          }}
+          onInput={(e) => onSliderInput(parseFloat(e.currentTarget.value))}
           className="min-w-0 flex-1 accent-accent"
         />
 
         <button
+          type="button"
           onClick={syncToNow}
           title="Snap to current UAE time"
           className="shrink-0 rounded-lg bg-panel2 px-2 py-1 text-[10px] font-medium text-slate-300 hover:bg-edge"
@@ -100,7 +131,7 @@ export default function TimeBar() {
       <p className="truncate text-center text-[9px] text-slate-500">
         {playing && (
           <span className="mr-1 font-semibold text-accent">
-            {atLiveEdge ? "● Live sync — traffic, air, weather pulsing" : "▶ Scrubbing — heat, fog, wind updating"}
+            {atLiveEdge ? "● Live sync" : "▶ Scrubbing"}
           </span>
         )}
         {!counterfactual ? (

@@ -15,8 +15,9 @@ export default function App() {
   const appLoading         = useStore((s) => s.appLoading);
   const playing            = useStore((s) => s.playing);
   const hour               = useStore((s) => s.hour);
-  const refreshAllLayers   = useStore((s) => s.refreshAllLayers);
-  const refreshLivePulse   = useStore((s) => s.refreshLivePulse);
+  const setHourLight         = useStore((s) => s.setHourLight);
+  const scheduleLayerRefresh = useStore((s) => s.scheduleLayerRefresh);
+  const refreshLivePulse     = useStore((s) => s.refreshLivePulse);
   const refreshAir         = useStore((s) => s.refreshAir);
   const refreshCongestion  = useStore((s) => s.refreshCongestion);
   const refreshEnvironment = useStore((s) => s.refreshEnvironment);
@@ -151,14 +152,14 @@ export default function App() {
 
       const snapped = snapUAEHour(targetH);
       hourRef.current = snapped;
-      useStore.setState({ hour: snapped });
+      setHourLight(snapped);
 
       const prev = lastPlayHourRef.current;
       lastPlayHourRef.current = snapped;
       const hourStep = prev === null || Math.abs(snapped - prev) >= 0.01;
 
       if (hourStep) {
-        void refreshAllLayers(snapped, { forceEnv: snapped >= maxH - 0.01 });
+        scheduleLayerRefresh(snapped, { forceEnv: snapped >= maxH - 0.01, immediate: true });
       } else {
         void refreshLivePulse();
       }
@@ -167,7 +168,7 @@ export default function App() {
     tick();
     const id = setInterval(tick, 2_000);
     return () => clearInterval(id);
-  }, [playing, refreshAllLayers, refreshLivePulse]);
+  }, [playing, setHourLight, scheduleLayerRefresh, refreshLivePulse]);
 
   return (
     <div className="relative h-full w-full">

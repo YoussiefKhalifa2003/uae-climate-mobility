@@ -170,6 +170,10 @@ interface State {
   setProfile: (p: UserProfile) => void;
   setTravelMode: (m: TravelMode) => void;
   setHour: (h: number) => void;
+  /** Update slider time instantly — no network. */
+  setHourLight: (h: number) => void;
+  /** Debounced full layer refresh for the given hour. */
+  scheduleLayerRefresh: (h: number, opts?: { forceEnv?: boolean; immediate?: boolean }) => void;
   togglePlay: () => void;
   toggleLayer: (k: keyof LayerToggles) => void;
   setPickMode: (m: "origin" | "destination" | null) => void;
@@ -239,12 +243,7 @@ export function isRouteRefreshBlocked(s: State): boolean {
 let _routeReqSeq = 0;
 let _routeAbort: AbortController | null = null;
 let _lastTrafficProvRefresh = 0;
-let _layerSyncQueue: Promise<void> = Promise.resolve();
-
-function enqueueLayerSync(work: () => Promise<void>): Promise<void> {
-  _layerSyncQueue = _layerSyncQueue.then(work).catch(() => {});
-  return _layerSyncQueue;
-}
+let _layerRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 function markLayerSynced(set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void) {
   set((s) => ({ layerSyncEpoch: s.layerSyncEpoch + 1, layerSyncAt: Date.now() }));
@@ -371,6 +370,22 @@ export const useStore = create<State>((set, get) => ({
     if (mode === "navigate" && origin && destination) get().computeRoute({ full: false });
   },
   setHour: (h) => set({ hour: snapUAEHour(h) }),
+  setHourLight: (h) => set({ hour: snapUAEHour(h) }),
+  scheduleLayerRefresh: (h, opts) => {
+    const snapped = snapUAEHour(h);
+    if (_layerRefreshTimer) {
+      clearTimeout(_layerRefreshTimer);
+      _layerRefreshTimer = null;
+    }
+    if (opts?.immediate) {
+      void get().refreshAllLayers(snapped, { forceEnv: opts.forceEnv });
+      return;
+    }
+    _layerRefreshTimer = setTimeout(() => {
+      _layerRefreshTimer = null;
+      void get().refreshAllLayers(snapped, { forceEnv: opts?.forceEnv });
+    }, 350);
+  },
   togglePlay: () => {
     const next = !get().playing;
     if (next && get().tripPlaying) get().stopTrip();
@@ -880,24 +895,22 @@ export const useStore = create<State>((set, get) => ({
   },
 
   refreshAllLayers: async (hourOverride?, opts?: { forceEnv?: boolean }) => {
-    return enqueueLayerSync(async () => {
-      const h = snapUAEHour(hourOverride ?? get().hour);
-      set({ hour: h });
+    const h = snapUAEHour(hourOverride ?? get().hour);
+    set({ hour: h });
 
-      const s = get();
-      await Promise.allSettled([
-        api.environment(h, opts?.forceEnv ?? false).then((env) => set({ env })),
-        api.comfort(h).then((comfort) => set({ comfort })),
-        get().refreshHumidityWind(h),
-        get().refreshAir(),
-        get().refreshCongestion(),
-        s.layers.worstSegments || s.mode === "simulate"
-          ? api.heatExposure(h, s.mode === "simulate" ? 200 : 25).then((he) => set({ heatExposure: he }))
-          : Promise.resolve(),
-      ]);
-      markLayerSynced(set);
-      if (opts?.forceEnv) void get().refreshProvenance();
-    });
+    const s = get();
+    await Promise.allSettled([
+      api.environment(h, opts?.forceEnv ?? false).then((env) => set({ env })),
+      api.comfort(h).then((comfort) => set({ comfort })),
+      get().refreshHumidityWind(h),
+      get().refreshAir(),
+      get().refreshCongestion(),
+      s.layers.worstSegments || s.mode === "simulate"
+        ? api.heatExposure(h, s.mode === "simulate" ? 200 : 25).then((he) => set({ heatExposure: he }))
+        : Promise.resolve(),
+    ]);
+    markLayerSynced(set);
+    if (opts?.forceEnv) void get().refreshProvenance();
   },
 
   setDepartureHour: async (h, opts) => {
