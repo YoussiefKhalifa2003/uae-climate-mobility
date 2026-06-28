@@ -19,7 +19,7 @@ from app.config import settings
 from app.core import air_quality, analytics, compute, geo_engine, router as router_engine, solar_comfort
 from app.core.traffic_sim import get_sim
 from app.data import provenance as provenance_mod
-from app.data.traffic_adapter import apply_tomtom_to_congestion, traffic_provenance
+from app.data.traffic_adapter import apply_tomtom_to_congestion, get_live_traffic_hint, traffic_provenance
 from app.models.schemas import (
     BestDepartureResponse,
     EnvSnapshot,
@@ -194,7 +194,13 @@ def environment(
     refresh: bool = Query(False, description="Bypass cache and fetch live data"),
 ):
     from app.data.adapters import get_environment
-    return get_environment(hour, force_refresh=refresh)
+
+    snap = get_environment(hour, force_refresh=refresh)
+    if refresh:
+        from app.core.wind_cfd import invalidate_wind_cache
+
+        invalidate_wind_cache()
+    return snap
 
 
 @app.get("/api/provenance")
@@ -258,8 +264,10 @@ def humidity_field(response: Response, hour: float = Query(14.0, ge=0, le=24)):
     if not _require_ready(response):
         return {"ready": False}
     from app.core.humidity_physics import humidity_raster_payload
+    from app.core.wind_cfd import wind_speed_grid
 
-    return humidity_raster_payload(hour)
+    wgrid = wind_speed_grid(hour)
+    return humidity_raster_payload(hour, wind_speed_grid=wgrid)
 
 
 @app.get("/api/wind")
@@ -461,10 +469,17 @@ def heat_exposure(
     response: Response,
     hour: float = Query(14.0, ge=0, le=24),
     worst_n: int = Query(25, ge=5, le=500),
+    west: float | None = None,
+    south: float | None = None,
+    east: float | None = None,
+    north: float | None = None,
 ):
     if not _require_ready(response):
         return {"summary": {}, "worst_segments": {"type": "FeatureCollection", "features": []}}
-    return analytics.heat_exposure_summary(hour, worst_n=worst_n)
+    bbox = None
+    if west is not None and south is not None and east is not None and north is not None:
+        bbox = (west, south, east, north)
+    return analytics.heat_exposure_summary(hour, worst_n=worst_n, bbox=bbox)
 
 
 @app.post("/api/whatif")
@@ -533,6 +548,28 @@ def traffic_stats(response: Response):
     return get_sim().stats()
 
 
+@app.get("/api/traffic/status")
+def traffic_status(response: Response):
+    """Whether traffic is live (TomTom) or simulated — for UI verification."""
+    if not _require_ready(response):
+        return {"ready": False, "live": False, "source": "loading"}
+    from app.data import provenance
+
+    stats = get_sim().stats()
+    traffic_provenance(float(stats.get("congested_pct", 0)))
+    hint = get_live_traffic_hint()
+    rec = next((r for r in provenance.get_all() if r["layer"] == "traffic"), None)
+    return {
+        "ready": True,
+        "live": bool(hint and rec and rec.get("live")),
+        "source": rec["source"] if rec else "unknown",
+        "detail": rec["detail"] if rec else "",
+        "tomtom_regional_congestion": hint.get("__tomtom_avg__") if hint else None,
+        "sim_congested_pct": float(stats.get("congested_pct", 0)),
+        "updated_age_s": rec["age_s"] if rec else None,
+    }
+
+
 @app.get("/api/traffic/roads")
 def traffic_roads(response: Response):
     """Drive-network road geometries (static, cached).  Fetch once at startup."""
@@ -546,5 +583,8 @@ def traffic_congestion(response: Response):
     """Per-edge congestion 0–1, polled every 2 s by the frontend."""
     if not _require_ready(response):
         return {}
-    base = get_sim().segment_congestion()
+    sim = get_sim()
+    stats = sim.stats()
+    traffic_provenance(float(stats.get("congested_pct", 0)))
+    base = sim.segment_congestion()
     return apply_tomtom_to_congestion(base)

@@ -7,7 +7,8 @@ import { AmbientLight, DirectionalLight, LightingEffect, WebMercatorViewport } f
 import type { MapViewState, PickingInfo } from "@deck.gl/core";
 import { useStore } from "./store/useStore";
 import { utciColor, pm25HeatColor, AIR_HEATMAP_COLORS, congestionColor, refugeColor, buildingColor } from "./lib/colors";
-import { selectedSegmentFeatures, windArrowPath, type GeoBounds } from "./lib/geoSelection";
+import { selectedSegmentFeatures, boundsFromFeatures, boundsFromViewState, featureMidpoint } from "./lib/geoSelection";
+import { createWindParticles, particleFade, stepWindParticles, type WindParticle } from "./lib/windParticles";
 import type { RouteOption } from "./api/client";
 import type { Layer } from "@deck.gl/core";
 import { activeTimeline, getActiveExposureContext, horizonTimeline, pmStressNorm, sampleTimeline, buildExposureRibbon, findShadeCrossings, timelineHasP95Bands } from "./lib/tripExposure";
@@ -251,7 +252,7 @@ export default function LiveMap() {
     humidityRaster,
     windRaster,
     airlockGates,
-    simulateSelectMode,
+    selectionFocusEpoch,
   } = store;
 
   const selRoute = route?.options[selectedRouteIdx];
@@ -299,9 +300,9 @@ export default function LiveMap() {
   });
   const mapRef = useRef<HTMLDivElement>(null);
   const [goldPulse, setGoldPulse] = useState(0);
-  const [windPhase, setWindPhase] = useState(0);
-  const [boxDrag, setBoxDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
-  const boxDragging = useRef(false);
+  const [windParticles, setWindParticles] = useState<WindParticle[]>([]);
+  const windParticlesRef = useRef<WindParticle[]>([]);
+  const lastFocusEpoch = useRef(0);
 
   // Fit view to sector on first load (skip when camera is following the trip).
   useEffect(() => {
@@ -323,61 +324,74 @@ export default function LiveMap() {
     const update = () => {
       const { width, height } = el.getBoundingClientRect();
       if (width < 20 || height < 20) return;
-      const vp = new WebMercatorViewport({ ...viewState, width, height });
-      const [west, north] = vp.unproject([0, 0]);
-      const [east, south] = vp.unproject([width, height]);
-      store.setMapViewBounds({ west, south, east, north });
+      const vp = {
+        longitude: viewState.longitude,
+        latitude: viewState.latitude,
+        zoom: viewState.zoom,
+        pitch: viewState.pitch ?? 0,
+        bearing: viewState.bearing ?? 0,
+        width,
+        height,
+      };
+      const st = useStore.getState();
+      st.setMapViewport(vp);
+      st.setMapViewBounds(boundsFromViewState(vp));
     };
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [viewState, mode, store]);
+  }, [viewState, mode]);
 
   // Neon pulse for selected streets.
   useEffect(() => {
     if (mode !== "simulate" || interventionEdgeUids.length === 0) return;
-    const id = setInterval(() => setGoldPulse((p) => (p + 1) % 120), 60);
+    const id = setInterval(() => setGoldPulse((p) => (p + 1) % 120), 45);
     return () => clearInterval(id);
   }, [mode, interventionEdgeUids.length]);
 
-  // Animate wind arrows when layer is on.
+  // Real-time wind particle advection (uses live synoptic wind + canyon model grid).
   useEffect(() => {
-    if (!layers.wind) return;
+    if (!layers.wind || !windRaster?.u_ms?.length) {
+      setWindParticles([]);
+      windParticlesRef.current = [];
+      return;
+    }
+    const seeded = createWindParticles(windRaster, 200);
+    windParticlesRef.current = seeded;
+    setWindParticles(seeded);
+
     let raf = 0;
-    const tick = () => {
-      setWindPhase((p) => (p + 1) % 240);
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const raster = useStore.getState().windRaster;
+      if (!raster?.u_ms?.length) return;
+      windParticlesRef.current = stepWindParticles(windParticlesRef.current, raster, dt);
+      setWindParticles([...windParticlesRef.current]);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [layers.wind]);
+  }, [layers.wind, windRaster?.hour, windRaster?.u_ms?.length]);
 
-  const viewportMetrics = useMemo(() => {
-    if (!mapRef.current) return null;
-    const { width, height } = mapRef.current.getBoundingClientRect();
-    if (width < 20) return null;
-    return { width, height, vp: new WebMercatorViewport({ ...viewState, width, height }) };
-  }, [viewState, boxDrag, goldPulse]);
-
-  const finishBoxSelect = (rect: { x0: number; y0: number; x1: number; y1: number }) => {
-    if (!viewportMetrics) return;
-    const { vp, width, height } = viewportMetrics;
-    const left = Math.max(0, Math.min(rect.x0, rect.x1));
-    const right = Math.min(width, Math.max(rect.x0, rect.x1));
-    const top = Math.max(0, Math.min(rect.y0, rect.y1));
-    const bottom = Math.min(height, Math.max(rect.y0, rect.y1));
-    if (right - left < 12 || bottom - top < 12) return;
-    const [west, north] = vp.unproject([left, top]);
-    const [east, south] = vp.unproject([right, bottom]);
-    const bounds: GeoBounds = {
-      west: Math.min(west, east),
-      east: Math.max(west, east),
-      south: Math.min(south, north),
-      north: Math.max(south, north),
-    };
-    store.selectInterventionInBounds(bounds, "replace");
-    store.setSimulateSelectMode("click");
-  };
+  // Fly camera to gold selection after bulk pick (select in view / top 10).
+  useEffect(() => {
+    if (mode !== "simulate" || !selectionFocusEpoch || selectionFocusEpoch === lastFocusEpoch.current) return;
+    if (!interventionEdgeUids.length) return;
+    lastFocusEpoch.current = selectionFocusEpoch;
+    const feats = selectedSegmentFeatures(interventionEdgeUids, heatExposure?.worst_segments, roadSegments);
+    const b = boundsFromFeatures(feats);
+    if (!b) return;
+    setViewState((v) => ({
+      ...v,
+      longitude: (b.west + b.east) / 2,
+      latitude: (b.south + b.north) / 2,
+      zoom: Math.min(17, Math.max(v.zoom ?? 14, 15.5)),
+      pitch: 58,
+      transitionDuration: 900,
+    }));
+  }, [selectionFocusEpoch, interventionEdgeUids, mode, heatExposure?.worst_segments, roadSegments]);
 
   // Zoom to upgraded streets only when user explicitly previews (once per preview).
   const lastTwinKey = useRef<string>("");
@@ -475,33 +489,6 @@ export default function LiveMap() {
     [humidityRaster],
   );
 
-  const windArrows = useMemo(() => {
-    if (!windRaster?.u_ms?.length) return [];
-    const [h, w] = windRaster.shape;
-    const b = windRaster.bounds_wgs84;
-    const out: { path: [number, number][]; speed: number }[] = [];
-    const step = Math.max(2, Math.floor(Math.min(h, w) / 14));
-    let idx = 0;
-    for (let r = 0; r < h; r += step) {
-      for (let c = 0; c < w; c += step) {
-        const i = r * w + c;
-        const u = windRaster.u_ms[i] ?? 0;
-        const v = windRaster.v_ms[i] ?? 0;
-        const speed = windRaster.speed_ms[i] ?? 0;
-        if (speed < 0.08) continue;
-        const lon = b.west + (c / Math.max(w - 1, 1)) * (b.east - b.west);
-        const lat = b.north - (r / Math.max(h - 1, 1)) * (b.north - b.south);
-        const phase = ((windPhase + idx * 7) % 240) / 240;
-        out.push({
-          path: windArrowPath(lon, lat, u, v, speed, phase, 70 + speed * 25),
-          speed,
-        });
-        idx += 1;
-      }
-    }
-    return out;
-  }, [windRaster, windPhase]);
-
   // Lighting follows the real sun position for the current hour.
   const lightingEffect = useMemo(
     () => makeLighting(comfort?.azimuth ?? 135, comfort?.elevation ?? 45),
@@ -513,7 +500,6 @@ export default function LiveMap() {
       store.setPoint({ lon: info.coordinate[0], lat: info.coordinate[1] });
       return;
     }
-    if (mode === "simulate" && simulateSelectMode === "box") return;
     if (mode === "simulate" && info.object?.properties?.uid) {
       const uid = String(info.object.properties.uid);
       const wasSelected = store.interventionEdgeUids.includes(uid);
@@ -612,20 +598,41 @@ export default function LiveMap() {
     }
   }
 
-  // 2c. Canyon wind — animated direction arrows (Phase 5-lite).
-  if (layers.wind && windArrows.length) {
+  // Wind flow — iOS Weather–style drifting streaks along live breeze + canyon model.
+  if (layers.wind && windParticles.length) {
+    const speedMax = Math.max(windRaster?.speed_max ?? 3, 0.5);
+    const streaks = windParticles.filter((p) => p.trail.length >= 2);
+
     deckLayers.push(
       new PathLayer({
-        id: "wind-arrows",
-        data: windArrows,
-        getPath: (d) => d.path,
-        getColor: (d) => {
-          const t = Math.min(1, d.speed / Math.max(windRaster?.speed_max ?? 3, 0.5));
-          return [56, 189, 248, Math.round(140 + t * 115)];
+        id: "wind-flow-glow",
+        data: streaks,
+        getPath: (d: WindParticle) => d.trail,
+        getColor: (d: WindParticle) => {
+          const t = Math.min(1, d.speed / speedMax);
+          const fade = particleFade(d.life);
+          return [186, 214, 255, Math.round(18 + fade * 28 + t * 22)];
         },
-        getWidth: (d) => 1.5 + Math.min(3, d.speed),
-        widthMinPixels: 2,
-        widthMaxPixels: 5,
+        getWidth: 5,
+        widthMinPixels: 3,
+        widthMaxPixels: 7,
+        capRounded: true,
+        jointRounded: true,
+        pickable: false,
+      }),
+      new PathLayer({
+        id: "wind-flow-streaks",
+        data: streaks,
+        getPath: (d: WindParticle) => d.trail,
+        getColor: (d: WindParticle) => {
+          const t = Math.min(1, d.speed / speedMax);
+          const fade = particleFade(d.life);
+          const alpha = Math.round(35 + fade * 130 + t * 90);
+          return [248, 252, 255, alpha];
+        },
+        getWidth: (d: WindParticle) => 0.9 + Math.min(1.4, d.speed * 0.35),
+        widthMinPixels: 0.7,
+        widthMaxPixels: 2.2,
         capRounded: true,
         jointRounded: true,
         pickable: false,
@@ -696,13 +703,14 @@ export default function LiveMap() {
         data: heatExposure.worst_segments as any,
         getLineColor: (f: any) => {
           const uid = f.properties?.uid;
-          if (selected.has(uid)) return [251, 191, 36, 255];
-          if (twinActive) return [100, 116, 139, 60];
-          return [248, 113, 113, 200];
+          if (selected.has(uid)) return [0, 0, 0, 0];
+          if (twinActive) return [100, 116, 139, 50];
+          return [248, 113, 113, 210];
         },
         getLineWidth: (f: any) => {
           const uid = f.properties?.uid;
-          return selected.has(uid) ? 10 : 4;
+          if (selected.has(uid)) return 0;
+          return 5;
         },
         lineWidthMinPixels: 2,
         pickable: mode === "simulate",
@@ -775,15 +783,30 @@ export default function LiveMap() {
     );
     if (selectedFeats.length) {
       const goldFc = { type: "FeatureCollection" as const, features: selectedFeats };
-      const pulse = 0.55 + Math.sin(goldPulse / 10) * 0.45;
+      const pulse = 0.65 + Math.sin(goldPulse / 8) * 0.35;
       const onTop = { depthTest: false as const };
+      const markers = selectedFeats
+        .map((f) => featureMidpoint(f))
+        .filter(Boolean)
+        .map((pos) => ({ position: pos as [number, number] }));
       deckLayers.push(
+        new GeoJsonLayer({
+          id: "selection-gold-outer",
+          data: goldFc as any,
+          getLineColor: [255, 160, 0, Math.round(pulse * 90)],
+          getLineWidth: 36,
+          lineWidthMinPixels: 22,
+          capRounded: true,
+          jointRounded: true,
+          pickable: false,
+          parameters: onTop,
+        }),
         new GeoJsonLayer({
           id: "selection-gold-glow",
           data: goldFc as any,
-          getLineColor: [255, 200, 0, Math.round(pulse * 120)],
-          getLineWidth: 24,
-          lineWidthMinPixels: 14,
+          getLineColor: [255, 215, 0, Math.round(pulse * 200)],
+          getLineWidth: 18,
+          lineWidthMinPixels: 12,
           capRounded: true,
           jointRounded: true,
           pickable: false,
@@ -792,15 +815,33 @@ export default function LiveMap() {
         new GeoJsonLayer({
           id: "selection-gold-core",
           data: goldFc as any,
-          getLineColor: [255, 240, 80, 255],
-          getLineWidth: 10,
-          lineWidthMinPixels: 6,
+          getLineColor: [255, 255, 200, 255],
+          getLineWidth: 8,
+          lineWidthMinPixels: 5,
           capRounded: true,
           jointRounded: true,
           pickable: true,
           parameters: onTop,
         }),
       );
+      if (markers.length) {
+        deckLayers.push(
+          new ScatterplotLayer({
+            id: "selection-gold-markers",
+            data: markers,
+            getPosition: (d) => d.position,
+            getFillColor: [255, 220, 50, Math.round(160 + pulse * 95)],
+            getRadius: 12 + pulse * 8,
+            radiusMinPixels: 8,
+            radiusMaxPixels: 18,
+            stroked: true,
+            getLineColor: [255, 255, 255, 220],
+            lineWidthMinPixels: 2,
+            pickable: false,
+            parameters: onTop,
+          }),
+        );
+      }
     }
   }
 
@@ -1110,64 +1151,22 @@ export default function LiveMap() {
     <div ref={mapRef} className="relative h-full w-full">
       <DeckGL
         viewState={viewState}
-        controller={mode !== "simulate" || simulateSelectMode !== "box"}
+        controller
         onViewStateChange={(e: any) => setViewState(e.viewState)}
         layers={deckLayers}
         effects={[lightingEffect]}
         onClick={onClick}
-        getCursor={() => {
-          if (store.pickMode) return "crosshair";
-          if (mode === "simulate" && simulateSelectMode === "box") return "crosshair";
-          return "grab";
-        }}
+        getCursor={() => (store.pickMode ? "crosshair" : "grab")}
       >
         <Map mapStyle={MAP_STYLE} attributionControl={false} />
       </DeckGL>
 
-      {mode === "simulate" && simulateSelectMode === "box" && (
-        <div
-          className="absolute inset-0 z-20 cursor-crosshair"
-          onPointerDown={(e) => {
-            if (e.button !== 0) return;
-            boxDragging.current = true;
-            const rect = e.currentTarget.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            setBoxDrag({ x0: x, y0: y, x1: x, y1: y });
-          }}
-          onPointerMove={(e) => {
-            if (!boxDragging.current) return;
-            const rect = e.currentTarget.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            setBoxDrag((prev) => (prev ? { ...prev, x1: x, y1: y } : null));
-          }}
-          onPointerUp={() => {
-            if (!boxDragging.current || !boxDrag) return;
-            boxDragging.current = false;
-            finishBoxSelect(boxDrag);
-            setBoxDrag(null);
-          }}
-          onPointerLeave={() => {
-            if (!boxDragging.current) return;
-            boxDragging.current = false;
-            if (boxDrag) finishBoxSelect(boxDrag);
-            setBoxDrag(null);
-          }}
-        >
-          {boxDrag && (
-            <div
-              className="pointer-events-none absolute border-2 border-amber-300 bg-amber-400/15"
-              style={{
-                left: Math.min(boxDrag.x0, boxDrag.x1),
-                top: Math.min(boxDrag.y0, boxDrag.y1),
-                width: Math.abs(boxDrag.x1 - boxDrag.x0),
-                height: Math.abs(boxDrag.y1 - boxDrag.y0),
-              }}
-            />
-          )}
-          <div className="pointer-events-none absolute left-1/2 top-16 -translate-x-1/2 rounded-lg border border-amber-400/50 bg-ink/90 px-3 py-1.5 text-[11px] text-amber-200">
-            Drag a box over the area you want to upgrade
+      {mode === "simulate" && interventionEdgeUids.length > 0 && (
+        <div className="pointer-events-none absolute left-1/2 top-24 z-20 -translate-x-1/2">
+          <div className="animate-pulse rounded-full border-2 border-amber-400 bg-amber-500/25 px-4 py-1.5 shadow-lg backdrop-blur">
+            <span className="text-sm font-bold text-amber-100">
+              ★ {interventionEdgeUids.length} streets selected — gold glow on map
+            </span>
           </div>
         </div>
       )}

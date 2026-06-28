@@ -158,6 +158,8 @@ class EnvSnapshot(BaseModel):
     aqi: int | None = None
     pm25_ug_m3: float | None = None
     fetched_at: float | None = None
+    wx_live: bool = False
+    aq_live: bool = False
 
 
 class ForecastDelta(BaseModel):

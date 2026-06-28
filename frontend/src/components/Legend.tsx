@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { useStore } from "../store/useStore";
 import { heatBandColor, refugeColor } from "../lib/colors";
 import CollapsibleCornerPanel from "./CollapsibleCornerPanel";
+import { api } from "../api/client";
 
 const LAYER_META: {
   key: keyof ReturnType<typeof useStore.getState>["layers"];
@@ -14,10 +16,10 @@ const LAYER_META: {
   { key: "humidity", label: "Humidity fog", hint: "Trapped coastal moisture (purple = worst)", simulateOnly: true },
   { key: "comfort", label: "Heat map", hint: "UTCI comfort field", provKey: "utci" },
   { key: "air", label: "Air pollution", hint: "Traffic + PM2.5 plume", provKey: "air_map" },
-  { key: "traffic", label: "Traffic", hint: "Road congestion", provKey: "traffic" },
+  { key: "traffic", label: "Traffic", hint: "Agent sim by default; add TOMTOM_API_KEY in .env for live flow", provKey: "traffic" },
   { key: "refuges", label: "Cool spots", hint: "Malls, metro, parks", provKey: "refuges" },
   { key: "routes", label: "Routes", hint: "Navigate mode only" },
-  { key: "wind", label: "Wind flow", hint: "Animated canyon breeze arrows", simulateOnly: true },
+  { key: "wind", label: "Wind flow", hint: "Flowing breeze streaks (live wind + canyon model)", simulateOnly: true },
 ];
 
 export default function Legend() {
@@ -25,9 +27,31 @@ export default function Legend() {
   const mode = useStore((s) => s.mode);
   const toggleLayer = useStore((s) => s.toggleLayer);
   const provenance = useStore((s) => s.provenance);
+  const [trafficStatus, setTrafficStatus] = useState<Awaited<ReturnType<typeof api.trafficStatus>> | null>(null);
+
+  useEffect(() => {
+    if (!layers.traffic) {
+      setTrafficStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      api.trafficStatus().then((s) => {
+        if (!cancelled) setTrafficStatus(s);
+      }).catch(() => {});
+    };
+    load();
+    const id = setInterval(load, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [layers.traffic]);
 
   const liveFor = (key?: string) =>
     key ? provenance?.layers.find((l) => l.layer === key)?.live : undefined;
+
+  const trafficProv = provenance?.layers.find((l) => l.layer === "traffic");
 
   const visible = LAYER_META.filter((m) => !m.simulateOnly || mode === "simulate");
 
@@ -69,6 +93,31 @@ export default function Legend() {
           );
         })}
       </div>
+
+      {layers.traffic && (trafficStatus?.ready || trafficProv) && (
+        <div className="mt-2 rounded-lg border border-edge/80 bg-panel2/40 px-2 py-1.5">
+          <p className="text-[9px] font-semibold uppercase tracking-wide text-slate-500">Traffic source</p>
+          <p className="mt-0.5 text-[10px] text-slate-200">
+            {(trafficStatus?.live ?? trafficProv?.live) ? (
+              <>
+                <span className="font-semibold text-accent">Live</span>
+                {" — "}
+                {trafficStatus?.detail ?? trafficProv?.detail ?? "TomTom Flow API"}
+              </>
+            ) : (
+              <>
+                <span className="font-semibold text-warn">Simulated</span>
+                {" — agent model (add TOMTOM_API_KEY for live)"}
+              </>
+            )}
+          </p>
+          {trafficStatus?.tomtom_regional_congestion != null && (
+            <p className="mt-0.5 font-mono text-[9px] text-slate-400">
+              TomTom regional congestion: {(trafficStatus.tomtom_regional_congestion * 100).toFixed(0)}%
+            </p>
+          )}
+        </div>
+      )}
 
       {mode !== "simulate" && (
         <>

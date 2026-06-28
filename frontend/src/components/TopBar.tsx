@@ -9,8 +9,8 @@ const MODES: { id: AppMode; label: string; icon: string }[] = [
 function envAgeLabel(fetchedAt?: number): string {
   if (!fetchedAt) return "";
   const s = Math.floor(Date.now() / 1000 - fetchedAt);
-  if (s < 60) return `updated ${s}s ago`;
-  return `updated ${Math.floor(s / 60)}m ago`;
+  if (s < 60) return `${s}s ago`;
+  return `${Math.floor(s / 60)}m ago`;
 }
 
 export default function TopBar() {
@@ -57,10 +57,15 @@ export default function TopBar() {
       <div className="pointer-events-auto rounded-xl border border-edge bg-panel/90 px-4 py-2 text-right shadow-xl backdrop-blur">
         {env ? (
           <div className="flex items-center gap-4 text-xs">
-            <Stat label="Air" value={`${env.air_temp_c.toFixed(1)}°C`} />
-            <Stat label="RH" value={`${env.relative_humidity.toFixed(0)}%`} />
+            <Stat label="Air" value={`${env.air_temp_c.toFixed(1)}°C`} live={env.wx_live} />
+            <Stat label="RH" value={`${env.relative_humidity.toFixed(0)}%`} live={env.wx_live} />
             <div>
-              <div className="text-[10px] uppercase text-slate-500">AQI</div>
+              <div className="flex items-center justify-end gap-1 text-[10px] uppercase text-slate-500">
+                AQI
+                {env.aq_live && (
+                  <span className="rounded bg-accent/20 px-1 text-[8px] font-bold text-accent">LIVE</span>
+                )}
+              </div>
               <div className="font-mono font-semibold" style={{ color: aqiColor(env.aqi ?? 0) }}>
                 {env.aqi ?? "-"}
               </div>
@@ -70,7 +75,7 @@ export default function TopBar() {
           <span className="text-xs text-slate-500">env…</span>
         )}
         <p className="mt-0.5 text-[10px] text-slate-500">
-          {env?.source ?? "…"}
+          {env?.wx_live ? "Open-Meteo · Downtown Dubai" : env?.source ?? "…"}
           {env?.fetched_at ? ` · ${envAgeLabel(env.fetched_at)}` : ""}
         </p>
       </div>
@@ -78,10 +83,13 @@ export default function TopBar() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, live }: { label: string; value: string; live?: boolean }) {
   return (
     <div>
-      <div className="text-[10px] uppercase text-slate-500">{label}</div>
+      <div className="flex items-center gap-1 text-[10px] uppercase text-slate-500">
+        {label}
+        {live && <span className="rounded bg-accent/20 px-1 text-[8px] font-bold text-accent">LIVE</span>}
+      </div>
       <div className="font-mono font-semibold text-slate-200">{value}</div>
     </div>
   );

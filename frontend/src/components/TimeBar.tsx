@@ -22,6 +22,7 @@ export default function TimeBar() {
   const counterfactual = useStore((s) => s.counterfactual);
   const layers = useStore((s) => s.layers);
   const humidityRaster = useStore((s) => s.humidityRaster);
+  const interventionEdgeUids = useStore((s) => s.interventionEdgeUids);
   const live = isNearNow(hour);
   const maxHour = getMaxSelectableUAEHour();
   const atLiveEdge = hour >= maxHour - 0.01;
@@ -68,7 +69,10 @@ export default function TimeBar() {
         {!counterfactual ? (
           <>
             <span className="text-red-300">Red</span> = hot streets ·{" "}
-            <span className="text-amber-300">Gold</span> = your picks
+            <span className="font-semibold text-amber-300">Gold glow</span> = your picks
+            {interventionEdgeUids.length > 0 && (
+              <span className="font-semibold text-amber-200"> ({interventionEdgeUids.length} selected)</span>
+            )}
             {layers.humidity && humidityRaster && (
               <>
                 {" · "}

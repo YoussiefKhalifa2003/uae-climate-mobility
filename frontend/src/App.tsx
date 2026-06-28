@@ -50,11 +50,12 @@ export default function App() {
   // Boot
   useEffect(() => { init(); }, [init]);
 
-  // Live weather/AQI: refresh every 60 s (bypass backend cache, refresh UTCI).
+  // Live weather/AQI: refresh every 45 s (bypass backend cache, refresh overlays).
   useEffect(() => {
-    const id = setInterval(() => refreshEnvironment(true), 60_000);
+    const ms = mode === "simulate" ? 45_000 : 60_000;
+    const id = setInterval(() => refreshEnvironment(true), ms);
     return () => clearInterval(id);
-  }, [refreshEnvironment]);
+  }, [refreshEnvironment, mode]);
 
   // Data provenance registry: every 30 s.
   useEffect(() => {
@@ -167,7 +168,7 @@ export default function App() {
       {!focusMode && <Sidebar />}
       {mode === "simulate" ? <TimeBar /> : <UrbanXRay />}
       {!focusMode && mode === "simulate" && <Legend />}
-      {!focusMode && mode !== "simulate" && <DataProvenance />}
+      {!focusMode && <DataProvenance />}
       <MapMoment />
 
       {/* Loading overlay */}

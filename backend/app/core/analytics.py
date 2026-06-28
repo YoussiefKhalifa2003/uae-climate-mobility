@@ -118,7 +118,20 @@ def _transform_geom(geom, transformer):
 # -------------------------------------------------------- heat exposure
 
 
-def heat_exposure_summary(hour=14.0, worst_n=25) -> dict:
+def _segment_intersects_bbox(geom, transformer, west: float, south: float, east: float, north: float) -> bool:
+    from shapely.geometry import box
+    from shapely.ops import transform as shp_transform
+
+    bbox_geom = box(west, south, east, north)
+    wgs = shp_transform(transformer.transform, geom)
+    return wgs.intersects(bbox_geom)
+
+
+def heat_exposure_summary(
+    hour=14.0,
+    worst_n=25,
+    bbox: tuple[float, float, float, float] | None = None,
+) -> dict:
     gd = get_geo()
     enrich = enrich_edges(hour)
     edges = gd.edges
@@ -158,7 +171,19 @@ def heat_exposure_summary(hour=14.0, worst_n=25) -> dict:
     from pyproj import Transformer
 
     t = Transformer.from_crs(f"EPSG:{gd.utm_epsg}", "EPSG:4326", always_xy=True)
-    scored = sorted(records, key=lambda r: (r[1], -r[2]), reverse=True)[:worst_n]
+    scored_all = sorted(records, key=lambda r: (r[1], -r[2]), reverse=True)
+    if bbox:
+        west, south, east, north = bbox
+        west, east = min(west, east), max(west, east)
+        south, north = min(south, north), max(north, south)
+        in_view = [
+            r
+            for r in scored_all
+            if _segment_intersects_bbox(r[4], t, west, south, east, north)
+        ]
+        scored = in_view[:worst_n]
+    else:
+        scored = scored_all[:worst_n]
     feats = []
     for uid, u_val, sh, ln, geom in scored:
         feats.append(

@@ -1,5 +1,14 @@
 import { create } from "zustand";
-import { uidsInBounds, type GeoBounds } from "../lib/geoSelection";
+import {
+  boundsFromViewState,
+  expandBounds,
+  normalizeBounds,
+  uidsInBounds,
+  uidsSpreadInBounds,
+  uidsSpreadGlobal,
+  type GeoBounds,
+  type MapViewport,
+} from "../lib/geoSelection";
 import {
   api,
   API_BASE,
@@ -147,8 +156,12 @@ interface State {
   airlockGates: { lat: number; lon: number; label: string }[];
 
   /** Simulate — map viewport bounds for "select in view". */
-  mapViewBounds: { west: number; south: number; east: number; north: number } | null;
-  simulateSelectMode: "click" | "box";
+  mapViewBounds: GeoBounds | null;
+  /** Full deck.gl viewport (for accurate bounds at click time). */
+  mapViewport: MapViewport | null;
+  selectingInView: boolean;
+  /** Bumped after bulk selection to fly the camera to gold streets. */
+  selectionFocusEpoch: number;
 
   setMode: (m: AppMode) => void;
   setProfile: (p: UserProfile) => void;
@@ -176,10 +189,14 @@ interface State {
   setForecastDelay: (min: number) => void;
   fetchRouteRisk: () => Promise<void>;
   seedInterventionFromWorst: (n?: number) => void;
-  selectInterventionInBounds: (bounds: GeoBounds, mode?: "replace" | "add") => void;
-  selectInterventionInView: (mode?: "replace" | "add") => void;
-  setSimulateSelectMode: (m: "click" | "box") => void;
+  selectInterventionInBounds: (
+    bounds: GeoBounds,
+    mode?: "replace" | "add",
+    segmentsOverride?: HeatExposure["worst_segments"],
+  ) => void;
+  selectInterventionInView: (mode?: "replace" | "add") => Promise<void>;
   setMapViewBounds: (b: GeoBounds | null) => void;
+  setMapViewport: (vp: MapViewport | null) => void;
   toggleInterventionEdge: (uid: string) => void;
   clearIntervention: () => void;
   setInterventionShade: (v: number) => void;
@@ -217,6 +234,7 @@ export function isRouteRefreshBlocked(s: State): boolean {
 /** Monotonic id so stale route responses never overwrite newer ones. */
 let _routeReqSeq = 0;
 let _routeAbort: AbortController | null = null;
+let _lastTrafficProvRefresh = 0;
 let _exposureAbort: AbortController | null = null;
 let _forecastAbort: AbortController | null = null;
 
@@ -278,7 +296,9 @@ export const useStore = create<State>((set, get) => ({
   v2xLoading: false,
   airlockGates: [],
   mapViewBounds: null,
-  simulateSelectMode: "click",
+  mapViewport: null,
+  selectingInView: false,
+  selectionFocusEpoch: 0,
 
   // ---- mode / ui setters ----
 
@@ -295,7 +315,9 @@ export const useStore = create<State>((set, get) => ({
       counterfactual: null,
       interventionEdgeUids: [],
       mapViewBounds: null,
-      simulateSelectMode: "click",
+      mapViewport: null,
+      selectingInView: false,
+      selectionFocusEpoch: 0,
       selectedRouteIdx: 0,
       tripPlaying: false,
       tripMinute: 0,
@@ -312,8 +334,9 @@ export const useStore = create<State>((set, get) => ({
       },
     });
     if (m === "simulate") {
-      get().computeHeatExposure();
+      void get().computeHeatExposure();
       void get().refreshHumidityWind();
+      void get().refreshHour(get().hour);
     }
     const { origin, destination } = get();
     if (m === "navigate" && origin && destination) get().computeRoute({ full: false });
@@ -586,23 +609,46 @@ export const useStore = create<State>((set, get) => ({
   seedInterventionFromWorst: (n = 10) => {
     const he = get().heatExposure;
     if (!he?.worst_segments?.features?.length) return;
-    const uids = he.worst_segments.features
-      .slice(0, n)
-      .map((f) => (f.properties as { uid?: string })?.uid)
-      .filter(Boolean) as string[];
+    const uids = uidsSpreadGlobal(he.worst_segments, n);
+    if (!uids.length) return;
     set({
       interventionEdgeUids: uids,
       edgeInterventions: Object.fromEntries(uids.map((u) => [u, get().interventionType])),
       counterfactual: null,
+      selectionFocusEpoch: get().selectionFocusEpoch + 1,
     });
-    get().setMapMoment(`Selected city-wide top ${uids.length} hottest streets`);
+    get().setMapMoment(`★ ${uids.length} hottest streets spread across the city — gold glow on map`);
   },
 
-  selectInterventionInBounds: (bounds, mode = "replace") => {
+  selectInterventionInBounds: (bounds, mode = "replace", segmentsOverride) => {
     const { heatExposure, interventionEdgeUids, interventionType } = get();
-    const found = uidsInBounds(bounds, heatExposure?.worst_segments);
+    const segments = segmentsOverride ?? heatExposure?.worst_segments;
+    const norm = normalizeBounds(bounds);
+    const maxPick = mode === "add" ? 12 : 16;
+
+    let found = uidsSpreadInBounds(norm, segments, maxPick);
     if (!found.length) {
-      set({ error: "No streets in that area — try zooming in or dragging a larger box." });
+      found = uidsInBounds(norm, segments).slice(0, maxPick);
+    }
+    if (!found.length) {
+      const padded = expandBounds(norm);
+      found = uidsSpreadInBounds(padded, segments, maxPick);
+      if (!found.length) {
+        found = uidsInBounds(padded, segments).slice(0, maxPick);
+      }
+    }
+    if (!found.length && segments !== heatExposure?.worst_segments) {
+      const global = heatExposure?.worst_segments;
+      found = uidsSpreadInBounds(norm, global, maxPick);
+      if (!found.length) found = uidsInBounds(norm, global).slice(0, maxPick);
+    }
+
+    if (!found.length) {
+      set({
+        error:
+          "No hot streets matched this view — pan so red highlighted streets are visible, or try City-wide top 10.",
+        selectingInView: false,
+      });
       return;
     }
     const next =
@@ -614,22 +660,68 @@ export const useStore = create<State>((set, get) => ({
       edgeInterventions: Object.fromEntries(next.map((u) => [u, interventionType])),
       counterfactual: null,
       error: undefined,
+      selectingInView: false,
+      selectionFocusEpoch: get().selectionFocusEpoch + 1,
     });
-    get().setMapMoment(`${next.length} streets selected in area`);
+    get().setMapMoment(`★ ${next.length} streets spread across your view — gold glow on map`);
   },
 
-  selectInterventionInView: (mode = "replace") => {
-    const bounds = get().mapViewBounds;
+  selectInterventionInView: async (mode = "replace") => {
+    const vp = get().mapViewport;
+    const cached = get().mapViewBounds;
+    const bounds = (vp ? boundsFromViewState(vp) : null) ?? (cached ? normalizeBounds(cached) : null);
     if (!bounds) {
       set({ error: "Map view not ready — wait a moment and try again." });
       return;
     }
-    get().selectInterventionInBounds(bounds, mode);
+
+    set({ mapViewBounds: bounds, error: undefined, selectingInView: true });
+    let segments = get().heatExposure?.worst_segments;
+    try {
+      const local = await api.heatExposure(get().hour, 150, bounds);
+      if (local?.worst_segments?.features?.length) {
+        segments = local.worst_segments;
+      }
+    } catch {
+      /* fall back to cached city-wide pool */
+    }
+    get().selectInterventionInBounds(bounds, mode, segments);
   },
 
-  setSimulateSelectMode: (m) => set({ simulateSelectMode: m }),
+  setMapViewport: (vp) => {
+    const cur = get().mapViewport;
+    if (
+      cur &&
+      vp &&
+      cur.longitude === vp.longitude &&
+      cur.latitude === vp.latitude &&
+      cur.zoom === vp.zoom &&
+      cur.pitch === vp.pitch &&
+      cur.bearing === vp.bearing &&
+      cur.width === vp.width &&
+      cur.height === vp.height
+    ) {
+      return;
+    }
+    if (!cur && !vp) return;
+    set({ mapViewport: vp });
+  },
 
-  setMapViewBounds: (b) => set({ mapViewBounds: b }),
+  setMapViewBounds: (b) => {
+    const cur = get().mapViewBounds;
+    if (
+      cur &&
+      b &&
+      cur.west === b.west &&
+      cur.south === b.south &&
+      cur.east === b.east &&
+      cur.north === b.north
+    ) {
+      return;
+    }
+    if (!cur && !b) return;
+    set({ mapViewBounds: b });
+  },
 
   toggleInterventionEdge: (uid) => {
     const type = get().interventionType;
@@ -948,10 +1040,15 @@ export const useStore = create<State>((set, get) => ({
       const h = get().hour;
       const env = await api.environment(h, force);
       set({ env });
-      // Recompute UTCI raster when live weather refreshes.
       if (force) {
         const comfort = await api.comfort(h);
         set({ comfort });
+        if (get().mode === "simulate") {
+          await get().refreshAir();
+          await get().refreshHumidityWind();
+          await get().computeHeatExposure();
+          get().refreshProvenance();
+        }
       }
     } catch {
       /* non-fatal */
@@ -1006,6 +1103,11 @@ export const useStore = create<State>((set, get) => ({
     try {
       const c = await api.trafficCongestion();
       set((s) => ({ congestion: c, congestionSeq: s.congestionSeq + 1 }));
+      const now = Date.now();
+      if (now - _lastTrafficProvRefresh > 25_000) {
+        _lastTrafficProvRefresh = now;
+        void get().refreshProvenance();
+      }
     } catch {
       /* non-fatal */
     }

@@ -8,7 +8,7 @@ export default function MapMoment() {
 
   useEffect(() => {
     if (!mapMoment) return;
-    const t = setTimeout(() => setMapMoment(null), 4000);
+    const t = setTimeout(() => setMapMoment(null), 6500);
     return () => clearTimeout(t);
   }, [mapMoment, setMapMoment]);
 

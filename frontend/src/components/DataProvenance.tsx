@@ -9,6 +9,11 @@ function fmtAge(s: number): string {
 }
 
 function Row({ r }: { r: ProvenanceLayer }) {
+  const trafficHint =
+    r.layer === "traffic" && !r.live
+      ? "Add TOMTOM_API_KEY to .env for live regional congestion (optional)."
+      : null;
+
   return (
     <div className="rounded-lg bg-panel2/50 px-2 py-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -22,7 +27,9 @@ function Row({ r }: { r: ProvenanceLayer }) {
         </span>
       </div>
       <div className="mt-0.5 font-mono text-[9px] text-slate-500">{r.source}</div>
-      {r.detail && <div className="mt-0.5 text-[9px] text-slate-400">{r.detail}</div>}
+      {(r.detail || trafficHint) && (
+        <div className="mt-0.5 text-[9px] text-slate-400">{trafficHint ?? r.detail}</div>
+      )}
       <div className="mt-0.5 text-[9px] text-slate-600">Updated {fmtAge(r.age_s)}</div>
     </div>
   );

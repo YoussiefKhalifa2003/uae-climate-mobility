@@ -219,6 +219,8 @@ export interface EnvSnapshot {
   aqi?: number;
   pm25_ug_m3?: number;
   fetched_at?: number;
+  wx_live?: boolean;
+  aq_live?: boolean;
 }
 
 export interface AirStation {
@@ -452,8 +454,16 @@ export const api = {
     post<RouteRiskResponse>("/api/route-risk", body),
   bestDeparture: (body: any) => post<BestDeparture>("/api/best-departure", body),
   isochrone: (body: any) => post<GeoJSON.FeatureCollection>("/api/isochrone", body),
-  heatExposure: (hour: number, worstN = 25) =>
-    get<HeatExposure>(`/api/heat-exposure?hour=${hour}&worst_n=${worstN}`),
+  heatExposure: (hour: number, worstN = 25, bounds?: { west: number; south: number; east: number; north: number }) => {
+    const params = new URLSearchParams({ hour: String(hour), worst_n: String(worstN) });
+    if (bounds) {
+      params.set("west", String(bounds.west));
+      params.set("south", String(bounds.south));
+      params.set("east", String(bounds.east));
+      params.set("north", String(bounds.north));
+    }
+    return get<HeatExposure>(`/api/heat-exposure?${params}`);
+  },
   whatif: (body: { edge_uids: string[]; added_shade_fraction: number; hour: number }) =>
     post<{ edges_changed: number; city_utci_reduction_c: number; network_km_upgraded_band: number }>("/api/whatif", body),
   counterfactual: (body: {
@@ -473,6 +483,16 @@ export const api = {
     post<V2XScenario>("/api/v2x-scenario", body),
   getV2xScenario: () => get<V2XScenario>("/api/v2x-scenario"),
   trafficStats: () => get<any>("/api/traffic/stats"),
+  trafficStatus: () =>
+    get<{
+      ready: boolean;
+      live: boolean;
+      source: string;
+      detail?: string;
+      tomtom_regional_congestion?: number | null;
+      sim_congested_pct?: number;
+      updated_age_s?: number | null;
+    }>("/api/traffic/status"),
   trafficRoads: () => get<GeoJSON.FeatureCollection>("/api/traffic/roads"),
   trafficCongestion: () => get<Record<string, number>>("/api/traffic/congestion"),
 };

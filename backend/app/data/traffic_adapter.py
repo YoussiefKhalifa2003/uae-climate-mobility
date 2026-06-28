@@ -77,7 +77,7 @@ def traffic_provenance(sim_congested_pct: float) -> None:
         "Live Traffic",
         "simulated:agent-model",
         False,
-        f"24k agents on OSM roads · {sim_congested_pct:.0f}% congested (not TomTom/Waze)",
+        "24k agents on OSM roads — add TOMTOM_API_KEY in .env for live regional flow",
     )
 
 
