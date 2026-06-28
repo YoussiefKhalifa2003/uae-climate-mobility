@@ -162,6 +162,9 @@ interface State {
   selectingInView: boolean;
   /** Bumped after bulk selection to fly the camera to gold streets. */
   selectionFocusEpoch: number;
+  /** Monotonic counter — forces map layer redraws after each sync. */
+  layerSyncEpoch: number;
+  layerSyncAt?: number;
 
   setMode: (m: AppMode) => void;
   setProfile: (p: UserProfile) => void;
@@ -207,6 +210,7 @@ interface State {
   setTwinMapView: (v: "baseline" | "scenario") => void;
   setV2xScenario: (active: boolean, penetration: number) => Promise<void>;
   refreshHumidityWind: (hour?: number) => Promise<void>;
+  refreshLivePulse: () => Promise<void>;
   refreshAllLayers: (hour?: number, opts?: { forceEnv?: boolean }) => Promise<void>;
   init: () => Promise<void>;
   refreshHour: (h: number) => Promise<void>;
@@ -235,7 +239,16 @@ export function isRouteRefreshBlocked(s: State): boolean {
 let _routeReqSeq = 0;
 let _routeAbort: AbortController | null = null;
 let _lastTrafficProvRefresh = 0;
-let _layerSyncSeq = 0;
+let _layerSyncQueue: Promise<void> = Promise.resolve();
+
+function enqueueLayerSync(work: () => Promise<void>): Promise<void> {
+  _layerSyncQueue = _layerSyncQueue.then(work).catch(() => {});
+  return _layerSyncQueue;
+}
+
+function markLayerSynced(set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void) {
+  set((s) => ({ layerSyncEpoch: s.layerSyncEpoch + 1, layerSyncAt: Date.now() }));
+}
 let _exposureAbort: AbortController | null = null;
 let _forecastAbort: AbortController | null = null;
 
@@ -300,6 +313,7 @@ export const useStore = create<State>((set, get) => ({
   mapViewport: null,
   selectingInView: false,
   selectionFocusEpoch: 0,
+  layerSyncEpoch: 0,
 
   // ---- mode / ui setters ----
 
@@ -330,7 +344,7 @@ export const useStore = create<State>((set, get) => ({
         worstSegments: m === "simulate",
         comfort: m === "simulate",
         humidity: m === "simulate",
-        wind: false,
+        wind: m === "simulate",
         routes: m === "navigate",
       },
     });
@@ -845,37 +859,45 @@ export const useStore = create<State>((set, get) => ({
         api.airlocks(),
       ]);
       set({ humidityRaster, windRaster, airlockGates: airlocks.gates ?? [] });
+      set((s) => ({ layerSyncEpoch: s.layerSyncEpoch + 1, layerSyncAt: Date.now() }));
     } catch {
       /* optional overlays */
     }
   },
 
-  refreshAllLayers: async (hourOverride?, opts?: { forceEnv?: boolean }) => {
-    const reqId = ++_layerSyncSeq;
-    const h = snapUAEHour(hourOverride ?? get().hour);
-    set({ hour: h });
-
-    const s = get();
-    const tasks: Promise<unknown>[] = [
-      api.environment(h, opts?.forceEnv ?? false).then((env) => {
-        if (reqId === _layerSyncSeq) set({ env });
-      }),
-      api.comfort(h).then((comfort) => {
-        if (reqId === _layerSyncSeq) set({ comfort });
-      }),
-      get().refreshHumidityWind(h),
-      get().refreshAir(),
-      get().refreshCongestion(),
-    ];
-    if (s.layers.worstSegments || s.mode === "simulate") {
-      tasks.push(
-        api.heatExposure(h, s.mode === "simulate" ? 200 : 25).then((he) => {
-          if (reqId === _layerSyncSeq) set({ heatExposure: he });
-        }),
-      );
+  refreshLivePulse: async () => {
+    const h = get().hour;
+    try {
+      await Promise.allSettled([
+        api.environment(h, true).then((env) => set({ env })),
+        get().refreshAir(),
+        get().refreshCongestion(),
+      ]);
+      markLayerSynced(set);
+    } catch {
+      /* non-fatal */
     }
-    await Promise.allSettled(tasks);
-    if (opts?.forceEnv) void get().refreshProvenance();
+  },
+
+  refreshAllLayers: async (hourOverride?, opts?: { forceEnv?: boolean }) => {
+    return enqueueLayerSync(async () => {
+      const h = snapUAEHour(hourOverride ?? get().hour);
+      set({ hour: h });
+
+      const s = get();
+      await Promise.allSettled([
+        api.environment(h, opts?.forceEnv ?? false).then((env) => set({ env })),
+        api.comfort(h).then((comfort) => set({ comfort })),
+        get().refreshHumidityWind(h),
+        get().refreshAir(),
+        get().refreshCongestion(),
+        s.layers.worstSegments || s.mode === "simulate"
+          ? api.heatExposure(h, s.mode === "simulate" ? 200 : 25).then((he) => set({ heatExposure: he }))
+          : Promise.resolve(),
+      ]);
+      markLayerSynced(set);
+      if (opts?.forceEnv) void get().refreshProvenance();
+    });
   },
 
   setDepartureHour: async (h, opts) => {
@@ -1099,6 +1121,7 @@ export const useStore = create<State>((set, get) => ({
         return;
       }
       set({ airRaster: data });
+      set((s) => ({ layerSyncEpoch: s.layerSyncEpoch + 1, layerSyncAt: Date.now() }));
     } catch {
       /* non-fatal */
     }
@@ -1107,7 +1130,7 @@ export const useStore = create<State>((set, get) => ({
   refreshCongestion: async () => {
     try {
       const c = await api.trafficCongestion();
-      set((s) => ({ congestion: c, congestionSeq: s.congestionSeq + 1 }));
+      set((s) => ({ congestion: c, congestionSeq: s.congestionSeq + 1, layerSyncEpoch: s.layerSyncEpoch + 1, layerSyncAt: Date.now() }));
       const now = Date.now();
       if (now - _lastTrafficProvRefresh > 25_000) {
         _lastTrafficProvRefresh = now;

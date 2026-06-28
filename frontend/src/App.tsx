@@ -16,6 +16,7 @@ export default function App() {
   const playing            = useStore((s) => s.playing);
   const hour               = useStore((s) => s.hour);
   const refreshAllLayers   = useStore((s) => s.refreshAllLayers);
+  const refreshLivePulse   = useStore((s) => s.refreshLivePulse);
   const refreshAir         = useStore((s) => s.refreshAir);
   const refreshCongestion  = useStore((s) => s.refreshCongestion);
   const refreshEnvironment = useStore((s) => s.refreshEnvironment);
@@ -70,17 +71,19 @@ export default function App() {
     return () => clearInterval(id);
   }, [syncToNow]);
 
-  // Air-quality refresh: every 5 s.
+  // Air-quality refresh: every 5 s (paused during play — play loop handles it).
   useEffect(() => {
+    if (playing) return;
     const id = setInterval(() => refreshAir(), 5_000);
     return () => clearInterval(id);
-  }, [refreshAir]);
+  }, [refreshAir, playing]);
 
-  // Road congestion refresh: every 2 s — fast enough to show traffic pulse.
+  // Road congestion refresh: every 2 s (paused during play).
   useEffect(() => {
+    if (playing) return;
     const id = setInterval(() => refreshCongestion(), 2_000);
     return () => clearInterval(id);
-  }, [refreshCongestion]);
+  }, [refreshCongestion, playing]);
 
   // Recompute routes when trip inputs change — Navigate mode only, never during X-Ray.
   useEffect(() => {
@@ -127,11 +130,15 @@ export default function App() {
     return () => clearInterval(id);
   }, [tripPlaying, tripDuration, setTripMinute, stopTrip]);
 
-  // Playback: advance the slider on a fixed clock; refresh every layer in parallel (non-blocking).
+  // Playback: scrub through hours, then live-pulse all layers at the current time.
   const hourRef = useRef(hour);
   hourRef.current = hour;
+  const lastPlayHourRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!playing) return;
+    if (!playing) {
+      lastPlayHourRef.current = null;
+      return;
+    }
 
     const tick = () => {
       const nowH = getCurrentUAEHour();
@@ -146,13 +153,21 @@ export default function App() {
       hourRef.current = snapped;
       useStore.setState({ hour: snapped });
 
-      void refreshAllLayers(snapped, { forceEnv: atLive || snapped >= maxH - 0.01 });
+      const prev = lastPlayHourRef.current;
+      lastPlayHourRef.current = snapped;
+      const hourStep = prev === null || Math.abs(snapped - prev) >= 0.01;
+
+      if (hourStep) {
+        void refreshAllLayers(snapped, { forceEnv: snapped >= maxH - 0.01 });
+      } else {
+        void refreshLivePulse();
+      }
     };
 
     tick();
-    const id = setInterval(tick, 1_500);
+    const id = setInterval(tick, 2_000);
     return () => clearInterval(id);
-  }, [playing, refreshAllLayers]);
+  }, [playing, refreshAllLayers, refreshLivePulse]);
 
   return (
     <div className="relative h-full w-full">

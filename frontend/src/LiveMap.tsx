@@ -253,6 +253,7 @@ export default function LiveMap() {
     windRaster,
     airlockGates,
     selectionFocusEpoch,
+    layerSyncEpoch,
   } = store;
 
   const selRoute = route?.options[selectedRouteIdx];
@@ -460,7 +461,7 @@ export default function LiveMap() {
   // Comfort bitmap — recompute only when values change.
   const comfortImage = useMemo(
     () => (comfort ? buildComfortImage(comfort.values, comfort.shape as [number, number]) : null),
-    [comfort]
+    [comfort, layerSyncEpoch],
   );
 
   const airImage = useMemo(
@@ -473,7 +474,7 @@ export default function LiveMap() {
             airRaster.pm25_max
           )
         : null,
-    [airRaster]
+    [airRaster, layerSyncEpoch],
   );
 
   const humidityImage = useMemo(
@@ -486,7 +487,7 @@ export default function LiveMap() {
             humidityRaster.rh_max,
           )
         : null,
-    [humidityRaster],
+    [humidityRaster, layerSyncEpoch],
   );
 
   // Lighting follows the real sun position for the current hour.

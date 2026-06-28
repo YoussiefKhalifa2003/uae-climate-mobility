@@ -385,11 +385,19 @@ export async function fetchWithTimeout(url: string, opts?: RequestInit & { timeo
   }
 }
 
-async function get<T>(path: string, opts?: { timeoutMs?: number }): Promise<T> {
-  const r = await fetchWithTimeout(`${API_BASE}${path}`, { timeoutMs: opts?.timeoutMs ?? 30_000 });
-  if (r.status === 202) throw new Error(`GET ${path} -> still loading (202)`);
-  if (!r.ok) throw new Error(`GET ${path} -> ${r.status}`);
-  return r.json();
+async function get<T>(path: string, opts?: { timeoutMs?: number; retries?: number }): Promise<T> {
+  const retries = opts?.retries ?? 4;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const r = await fetchWithTimeout(`${API_BASE}${path}`, { timeoutMs: opts?.timeoutMs ?? 30_000 });
+    if (r.status === 202) {
+      if (attempt >= retries) throw new Error(`GET ${path} -> still loading (202)`);
+      await new Promise((resolve) => setTimeout(resolve, 400 + attempt * 300));
+      continue;
+    }
+    if (!r.ok) throw new Error(`GET ${path} -> ${r.status}`);
+    return r.json();
+  }
+  throw new Error(`GET ${path} -> still loading (202)`);
 }
 
 async function post<T>(
