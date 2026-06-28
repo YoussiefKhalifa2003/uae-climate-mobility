@@ -17,7 +17,7 @@ export default function TimeBar() {
   const playing = useStore((s) => s.playing);
   const tripPlaying = useStore((s) => s.tripPlaying);
   const togglePlay = useStore((s) => s.togglePlay);
-  const refreshHour = useStore((s) => s.refreshHour);
+  const refreshAllLayers = useStore((s) => s.refreshAllLayers);
   const syncToNow = useStore((s) => s.syncToNow);
   const counterfactual = useStore((s) => s.counterfactual);
   const layers = useStore((s) => s.layers);
@@ -52,7 +52,7 @@ export default function TimeBar() {
           max={maxHour}
           step={0.5}
           value={Math.min(hour, maxHour)}
-          onChange={(e) => refreshHour(snapUAEHour(parseFloat(e.target.value)))}
+          onChange={(e) => void refreshAllLayers(snapUAEHour(parseFloat(e.target.value)))}
           className="min-w-0 flex-1 accent-accent"
         />
 
@@ -66,6 +66,11 @@ export default function TimeBar() {
       </div>
 
       <p className="truncate text-center text-[9px] text-slate-500">
+        {playing && (
+          <span className="mr-1 font-semibold text-accent">
+            {atLiveEdge ? "● Live sync" : "▶ Scrubbing"}
+          </span>
+        )}
         {!counterfactual ? (
           <>
             <span className="text-red-300">Red</span> = hot streets ·{" "}

@@ -206,8 +206,8 @@ interface State {
   clearCounterfactual: () => void;
   setTwinMapView: (v: "baseline" | "scenario") => void;
   setV2xScenario: (active: boolean, penetration: number) => Promise<void>;
-  refreshHumidityWind: () => Promise<void>;
-
+  refreshHumidityWind: (hour?: number) => Promise<void>;
+  refreshAllLayers: (hour?: number, opts?: { forceEnv?: boolean }) => Promise<void>;
   init: () => Promise<void>;
   refreshHour: (h: number) => Promise<void>;
   refreshEnvironment: (force?: boolean) => Promise<void>;
@@ -235,6 +235,7 @@ export function isRouteRefreshBlocked(s: State): boolean {
 let _routeReqSeq = 0;
 let _routeAbort: AbortController | null = null;
 let _lastTrafficProvRefresh = 0;
+let _layerSyncSeq = 0;
 let _exposureAbort: AbortController | null = null;
 let _forecastAbort: AbortController | null = null;
 
@@ -835,8 +836,8 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  refreshHumidityWind: async () => {
-    const h = get().hour;
+  refreshHumidityWind: async (hourOverride?) => {
+    const h = snapUAEHour(hourOverride ?? get().hour);
     try {
       const [humidityRaster, windRaster, airlocks] = await Promise.all([
         api.humidity(h),
@@ -847,6 +848,34 @@ export const useStore = create<State>((set, get) => ({
     } catch {
       /* optional overlays */
     }
+  },
+
+  refreshAllLayers: async (hourOverride?, opts?: { forceEnv?: boolean }) => {
+    const reqId = ++_layerSyncSeq;
+    const h = snapUAEHour(hourOverride ?? get().hour);
+    set({ hour: h });
+
+    const s = get();
+    const tasks: Promise<unknown>[] = [
+      api.environment(h, opts?.forceEnv ?? false).then((env) => {
+        if (reqId === _layerSyncSeq) set({ env });
+      }),
+      api.comfort(h).then((comfort) => {
+        if (reqId === _layerSyncSeq) set({ comfort });
+      }),
+      get().refreshHumidityWind(h),
+      get().refreshAir(),
+      get().refreshCongestion(),
+    ];
+    if (s.layers.worstSegments || s.mode === "simulate") {
+      tasks.push(
+        api.heatExposure(h, s.mode === "simulate" ? 200 : 25).then((he) => {
+          if (reqId === _layerSyncSeq) set({ heatExposure: he });
+        }),
+      );
+    }
+    await Promise.allSettled(tasks);
+    if (opts?.forceEnv) void get().refreshProvenance();
   },
 
   setDepartureHour: async (h, opts) => {
@@ -1037,19 +1066,7 @@ export const useStore = create<State>((set, get) => ({
 
   refreshEnvironment: async (force = false) => {
     try {
-      const h = get().hour;
-      const env = await api.environment(h, force);
-      set({ env });
-      if (force) {
-        const comfort = await api.comfort(h);
-        set({ comfort });
-        if (get().mode === "simulate") {
-          await get().refreshAir();
-          await get().refreshHumidityWind();
-          await get().computeHeatExposure();
-          get().refreshProvenance();
-        }
-      }
+      await get().refreshAllLayers(get().hour, { forceEnv: force });
     } catch {
       /* non-fatal */
     }
@@ -1065,19 +1082,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   refreshHour: async (h) => {
-    const snapped = snapUAEHour(h);
-    set({ hour: snapped });
-    try {
-      const [env, comfort] = await Promise.all([
-        api.environment(snapped),
-        api.comfort(snapped),
-      ]);
-      set({ env, comfort });
-      void get().refreshHumidityWind();
-      if (get().layers.worstSegments || get().mode === "simulate") await get().computeHeatExposure();
-    } catch {
-      /* transient */
-    }
+    await get().refreshAllLayers(h);
   },
 
   refreshAir: async () => {
@@ -1123,20 +1128,30 @@ export const useStore = create<State>((set, get) => ({
     _routeAbort = new AbortController();
 
     set({ routing: true, error: undefined, tripPlaying: false, tripMinute: 0, tripCityHourSnap: -1, exposureForecast: null, forecastDelayMin: 0, forecastError: null, routeRisk: null });
+    const timeoutMs = full ? 120_000 : 90_000;
+    const body = {
+      origin,
+      destination,
+      mode: travelMode,
+      profile,
+      hour,
+      live: full,
+      include_horizon: full,
+      include_multimodal: full || travelMode === "drive",
+    };
+
+    const fetchOnce = () =>
+      api.route(body, { signal: _routeAbort!.signal, timeoutMs });
+
     try {
-      const route = await api.route(
-        {
-          origin,
-          destination,
-          mode: travelMode,
-          profile,
-          hour,
-          live: full,
-          include_horizon: full,
-          include_multimodal: full || travelMode === "drive",
-        },
-        { signal: _routeAbort.signal, timeoutMs: full ? 90_000 : 45_000 },
-      );
+      let route;
+      try {
+        route = await fetchOnce();
+      } catch (first: any) {
+        if (reqId !== _routeReqSeq) return;
+        if (!first.message?.includes("timed out")) throw first;
+        route = await fetchOnce();
+      }
       if (reqId !== _routeReqSeq) return;
 
       const idx = Math.min(get().selectedRouteIdx, Math.max(0, route.options.length - 1));

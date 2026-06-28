@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import LiveMap from "./LiveMap";
-import { useStore, getCurrentUAEHour, getMaxSelectableUAEHour, isRouteRefreshBlocked } from "./store/useStore";
+import { useStore, getCurrentUAEHour, getMaxSelectableUAEHour, isRouteRefreshBlocked, snapUAEHour } from "./store/useStore";
 import { getActiveExposureContext } from "./lib/tripExposure";
 import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
@@ -15,7 +15,7 @@ export default function App() {
   const appLoading         = useStore((s) => s.appLoading);
   const playing            = useStore((s) => s.playing);
   const hour               = useStore((s) => s.hour);
-  const refreshHour        = useStore((s) => s.refreshHour);
+  const refreshAllLayers   = useStore((s) => s.refreshAllLayers);
   const refreshAir         = useStore((s) => s.refreshAir);
   const refreshCongestion  = useStore((s) => s.refreshCongestion);
   const refreshEnvironment = useStore((s) => s.refreshEnvironment);
@@ -127,39 +127,32 @@ export default function App() {
     return () => clearInterval(id);
   }, [tripPlaying, tripDuration, setTripMinute, stopTrip]);
 
-  // Playback: catch up to current UAE time, then stay live (never predict the future).
+  // Playback: advance the slider on a fixed clock; refresh every layer in parallel (non-blocking).
   const hourRef = useRef(hour);
   hourRef.current = hour;
-  const inFlight = useRef(false);
   useEffect(() => {
     if (!playing) return;
-    const id = setInterval(async () => {
-      if (inFlight.current) return;
-      inFlight.current = true;
-      try {
-        const nowH = getCurrentUAEHour();
-        const maxH = getMaxSelectableUAEHour();
-        const current = hourRef.current;
 
-        if (current >= maxH - 0.01) {
-          // At live edge — sync clock + all live layers to real time.
-          await refreshHour(nowH);
-          refreshAir();
-          refreshCongestion();
-        } else {
-          const next = Math.min(maxH, Math.round((current + 0.5) * 2) / 2);
-          await refreshHour(next);
-          refreshAir();
-          refreshCongestion();
-        }
-      } catch {
-        /* transient — ignore during playback */
-      } finally {
-        inFlight.current = false;
-      }
-    }, 2_500);
+    const tick = () => {
+      const nowH = getCurrentUAEHour();
+      const maxH = getMaxSelectableUAEHour();
+      const current = hourRef.current;
+      const atLive = current >= maxH - 0.01;
+      const targetH = atLive
+        ? nowH
+        : Math.min(maxH, Math.round((current + 0.5) * 2) / 2);
+
+      const snapped = snapUAEHour(targetH);
+      hourRef.current = snapped;
+      useStore.setState({ hour: snapped });
+
+      void refreshAllLayers(snapped, { forceEnv: atLive || snapped >= maxH - 0.01 });
+    };
+
+    tick();
+    const id = setInterval(tick, 1_500);
     return () => clearInterval(id);
-  }, [playing, refreshHour, refreshAir, refreshCongestion]);
+  }, [playing, refreshAllLayers]);
 
   return (
     <div className="relative h-full w-full">
