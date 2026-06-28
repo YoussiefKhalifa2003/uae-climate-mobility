@@ -457,10 +457,14 @@ def isochrone(req: IsochroneRequest, response: Response):
 
 
 @app.get("/api/heat-exposure")
-def heat_exposure(response: Response, hour: float = Query(14.0, ge=0, le=24)):
+def heat_exposure(
+    response: Response,
+    hour: float = Query(14.0, ge=0, le=24),
+    worst_n: int = Query(25, ge=5, le=500),
+):
     if not _require_ready(response):
         return {"summary": {}, "worst_segments": {"type": "FeatureCollection", "features": []}}
-    return analytics.heat_exposure_summary(hour)
+    return analytics.heat_exposure_summary(hour, worst_n=worst_n)
 
 
 @app.post("/api/whatif")

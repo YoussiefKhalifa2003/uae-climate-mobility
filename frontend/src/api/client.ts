@@ -452,7 +452,8 @@ export const api = {
     post<RouteRiskResponse>("/api/route-risk", body),
   bestDeparture: (body: any) => post<BestDeparture>("/api/best-departure", body),
   isochrone: (body: any) => post<GeoJSON.FeatureCollection>("/api/isochrone", body),
-  heatExposure: (hour: number) => get<HeatExposure>(`/api/heat-exposure?hour=${hour}`),
+  heatExposure: (hour: number, worstN = 25) =>
+    get<HeatExposure>(`/api/heat-exposure?hour=${hour}&worst_n=${worstN}`),
   whatif: (body: { edge_uids: string[]; added_shade_fraction: number; hour: number }) =>
     post<{ edges_changed: number; city_utci_reduction_c: number; network_km_upgraded_band: number }>("/api/whatif", body),
   counterfactual: (body: {

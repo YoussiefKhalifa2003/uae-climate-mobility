@@ -17,7 +17,7 @@ const LAYER_META: {
   { key: "traffic", label: "Traffic", hint: "Road congestion", provKey: "traffic" },
   { key: "refuges", label: "Cool spots", hint: "Malls, metro, parks", provKey: "refuges" },
   { key: "routes", label: "Routes", hint: "Navigate mode only" },
-  { key: "wind", label: "Wind", hint: "Canyon breeze (subtle)", simulateOnly: true },
+  { key: "wind", label: "Wind flow", hint: "Animated canyon breeze arrows", simulateOnly: true },
 ];
 
 export default function Legend() {

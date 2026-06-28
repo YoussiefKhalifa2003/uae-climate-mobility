@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { uidsInBounds, type GeoBounds } from "../lib/geoSelection";
 import {
   api,
   API_BASE,
@@ -145,6 +146,10 @@ interface State {
   windRaster?: WindRaster;
   airlockGates: { lat: number; lon: number; label: string }[];
 
+  /** Simulate — map viewport bounds for "select in view". */
+  mapViewBounds: { west: number; south: number; east: number; north: number } | null;
+  simulateSelectMode: "click" | "box";
+
   setMode: (m: AppMode) => void;
   setProfile: (p: UserProfile) => void;
   setTravelMode: (m: TravelMode) => void;
@@ -171,6 +176,10 @@ interface State {
   setForecastDelay: (min: number) => void;
   fetchRouteRisk: () => Promise<void>;
   seedInterventionFromWorst: (n?: number) => void;
+  selectInterventionInBounds: (bounds: GeoBounds, mode?: "replace" | "add") => void;
+  selectInterventionInView: (mode?: "replace" | "add") => void;
+  setSimulateSelectMode: (m: "click" | "box") => void;
+  setMapViewBounds: (b: GeoBounds | null) => void;
   toggleInterventionEdge: (uid: string) => void;
   clearIntervention: () => void;
   setInterventionShade: (v: number) => void;
@@ -268,6 +277,8 @@ export const useStore = create<State>((set, get) => ({
   v2xScenario: null,
   v2xLoading: false,
   airlockGates: [],
+  mapViewBounds: null,
+  simulateSelectMode: "click",
 
   // ---- mode / ui setters ----
 
@@ -283,6 +294,8 @@ export const useStore = create<State>((set, get) => ({
       forecastError: null,
       counterfactual: null,
       interventionEdgeUids: [],
+      mapViewBounds: null,
+      simulateSelectMode: "click",
       selectedRouteIdx: 0,
       tripPlaying: false,
       tripMinute: 0,
@@ -335,6 +348,7 @@ export const useStore = create<State>((set, get) => ({
     }
     if (k === "worstSegments" && next) get().computeHeatExposure();
     if (k === "humidity" && next) void get().refreshHumidityWind();
+    if (k === "wind" && next) void get().refreshHumidityWind();
     if (k === "comfort" && next) {
       get().refreshHour(s.hour);
       get().computeHeatExposure();
@@ -576,8 +590,46 @@ export const useStore = create<State>((set, get) => ({
       .slice(0, n)
       .map((f) => (f.properties as { uid?: string })?.uid)
       .filter(Boolean) as string[];
-    set({ interventionEdgeUids: uids, edgeInterventions: Object.fromEntries(uids.map((u) => [u, get().interventionType])), counterfactual: null });
+    set({
+      interventionEdgeUids: uids,
+      edgeInterventions: Object.fromEntries(uids.map((u) => [u, get().interventionType])),
+      counterfactual: null,
+    });
+    get().setMapMoment(`Selected city-wide top ${uids.length} hottest streets`);
   },
+
+  selectInterventionInBounds: (bounds, mode = "replace") => {
+    const { heatExposure, interventionEdgeUids, interventionType } = get();
+    const found = uidsInBounds(bounds, heatExposure?.worst_segments);
+    if (!found.length) {
+      set({ error: "No streets in that area — try zooming in or dragging a larger box." });
+      return;
+    }
+    const next =
+      mode === "add"
+        ? [...new Set([...interventionEdgeUids, ...found])]
+        : found;
+    set({
+      interventionEdgeUids: next,
+      edgeInterventions: Object.fromEntries(next.map((u) => [u, interventionType])),
+      counterfactual: null,
+      error: undefined,
+    });
+    get().setMapMoment(`${next.length} streets selected in area`);
+  },
+
+  selectInterventionInView: (mode = "replace") => {
+    const bounds = get().mapViewBounds;
+    if (!bounds) {
+      set({ error: "Map view not ready — wait a moment and try again." });
+      return;
+    }
+    get().selectInterventionInBounds(bounds, mode);
+  },
+
+  setSimulateSelectMode: (m) => set({ simulateSelectMode: m }),
+
+  setMapViewBounds: (b) => set({ mapViewBounds: b }),
 
   toggleInterventionEdge: (uid) => {
     const type = get().interventionType;
@@ -1033,11 +1085,9 @@ export const useStore = create<State>((set, get) => ({
 
   computeHeatExposure: async () => {
     try {
-      const he = await api.heatExposure(get().hour);
+      const worstN = get().mode === "simulate" ? 200 : 25;
+      const he = await api.heatExposure(get().hour, worstN);
       set({ heatExposure: he });
-      if (get().mode === "simulate" && get().interventionEdgeUids.length === 0) {
-        get().seedInterventionFromWorst(10);
-      }
     } catch {
       /* non-fatal */
     }
