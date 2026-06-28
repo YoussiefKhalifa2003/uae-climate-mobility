@@ -6,6 +6,7 @@ interface CollapsibleCornerPanelProps {
   className?: string;
   children: ReactNode;
   defaultOpen?: boolean;
+  positionClass?: string;
 }
 
 /** Bottom corner panel with minimize / restore. */
@@ -15,9 +16,10 @@ export default function CollapsibleCornerPanel({
   className = "",
   children,
   defaultOpen = true,
+  positionClass,
 }: CollapsibleCornerPanelProps) {
   const [open, setOpen] = useState(defaultOpen);
-  const pos = side === "left" ? "bottom-3 left-3" : "bottom-3 right-3";
+  const pos = positionClass ?? (side === "left" ? "bottom-3 left-3" : "bottom-3 right-3");
 
   if (!open) {
     return (

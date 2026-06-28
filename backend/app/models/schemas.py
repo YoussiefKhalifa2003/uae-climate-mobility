@@ -115,6 +115,7 @@ class RouteOption(BaseModel):
     refuges: list[dict] = Field(default_factory=list)
     legs: list[RouteLeg] = Field(default_factory=list)
     multimodal: bool = False
+    indoor_segments: list[dict] = Field(default_factory=list)
     thermal_horizon: ThermalHorizon | None = None
     path_colors: list[list[int]] | None = None
 
@@ -257,8 +258,15 @@ class WhatIfRequest(BaseModel):
     hour: float = Field(default=14.0, ge=0, le=24)
 
 
+class InterventionType(str, Enum):
+    SOLID_CANOPY = "SolidCanopy"
+    ACTIVE_MISTING = "ActiveMisting"
+    XERISCAPE_FORESTRY = "XeriscapeForestry"
+    LEGACY_SHADE = "LegacyShade"
+
+
 class CounterfactualRequest(BaseModel):
-    """Phase 3 — shade intervention twin with before/after city metrics."""
+    """Phase 8 — Dubai Walk 2040 intervention twin with before/after city metrics."""
 
     edge_uids: list[str] = Field(default_factory=list)
     added_shade_fraction: float = Field(default=0.7, ge=0, le=1)
@@ -266,6 +274,10 @@ class CounterfactualRequest(BaseModel):
     origin: LatLon | None = None
     isochrone_minutes: float | None = Field(default=None, gt=0, le=60)
     profile: UserProfile = UserProfile.default
+    intervention_type: InterventionType = Field(default=InterventionType.SOLID_CANOPY)
+    edge_interventions: dict[str, InterventionType] | None = Field(
+        default=None, description="Per-edge intervention override map uid -> type"
+    )
 
 
 class CounterfactualSummary(BaseModel):
@@ -292,13 +304,41 @@ class CounterfactualIsochroneDelta(BaseModel):
     area_gain_pct: float
 
 
+class WalkabilityIndex(BaseModel):
+    score: float
+    delta_vs_baseline: float | None = None
+    components: dict[str, float] = Field(default_factory=dict)
+
+
+class InterventionROI(BaseModel):
+    uid: str
+    intervention: str
+    utci_reduction_c: float
+    roi_per_km: float
+
+
 class CounterfactualResponse(BaseModel):
     hour: float
+    intervention_type: str = "SolidCanopy"
     added_shade_fraction: float
     baseline: CounterfactualSummary
     scenario: CounterfactualSummary
     target_baseline: CounterfactualSummary | None = None
     target_scenario: CounterfactualSummary | None = None
+    walkability: dict | None = None
+    intervention_roi: list[InterventionROI] = Field(default_factory=list)
     delta: CounterfactualDelta
     affected_segments: dict
     isochrone: CounterfactualIsochroneDelta | None = None
+
+
+class V2XScenarioRequest(BaseModel):
+    v2x_coordination_active: bool = False
+    av_penetration_rate: float = Field(default=0.0, ge=0, le=1)
+
+
+class V2XScenarioResponse(BaseModel):
+    v2x_coordination_active: bool
+    av_penetration_rate: float
+    emission_scale: float
+    speed_smoothing: float

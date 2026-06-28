@@ -431,6 +431,12 @@ def get_geo() -> GeoData:
     global _DATA
     if _DATA is None:
         _DATA = UAEMapLoader().load()
+        try:
+            from app.core.indoor_network import attach_indoor_network
+
+            attach_indoor_network(_DATA)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Indoor network attach skipped: %s", exc)
         logger.info(
             "Geo loaded: %s | buildings=%d refuges=%d raster=%s synthetic=%s",
             _DATA.place,

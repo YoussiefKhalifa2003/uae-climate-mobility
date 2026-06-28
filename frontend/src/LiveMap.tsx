@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import DeckGL from "@deck.gl/react";
 import { GeoJsonLayer, PathLayer, ScatterplotLayer, BitmapLayer } from "@deck.gl/layers";
 import { HeatmapLayer } from "@deck.gl/aggregation-layers";
@@ -162,6 +162,62 @@ function buildAirImage(
   return img;
 }
 
+function buildHumidityImage(values: number[], shape: [number, number], rhMin: number, rhMax: number): ImageData | null {
+  const [h, w] = shape;
+  if (!h || !w || values.length !== h * w) return null;
+  const img = new ImageData(w, h);
+  const span = Math.max(rhMax - rhMin, 1.5);
+  for (let i = 0; i < values.length; i++) {
+    const rh = values[i];
+    // Trap strength = how much RH rises above the sector minimum (canyon trapping).
+    const trap = Math.max(0, Math.min(1, (rh - rhMin) / span));
+    if (trap < 0.04) continue;
+    const t = Math.pow(trap, 0.65);
+    const alpha = Math.round(55 + t * 200);
+    const o = i * 4;
+    if (trap >= 0.55 || rh >= 80) {
+      img.data[o] = 192;
+      img.data[o + 1] = 80;
+      img.data[o + 2] = 255;
+    } else if (trap >= 0.28 || rh >= 70) {
+      img.data[o] = 56;
+      img.data[o + 1] = 189;
+      img.data[o + 2] = 248;
+    } else {
+      img.data[o] = 34;
+      img.data[o + 1] = 211;
+      img.data[o + 2] = 238;
+    }
+    img.data[o + 3] = alpha;
+  }
+  return img;
+}
+
+/** High-RH cells for a glowing heatmap on top of the bitmap. */
+function humidityHotspots(
+  values: number[],
+  shape: [number, number],
+  bounds: { west: number; south: number; east: number; north: number },
+  rhMin: number,
+  rhMax: number,
+): [number, number, number][] {
+  const [h, w] = shape;
+  const out: [number, number, number][] = [];
+  const span = Math.max(rhMax - rhMin, 1.5);
+  const step = Math.max(2, Math.floor(Math.min(h, w) / 40));
+  for (let r = 0; r < h; r += step) {
+    for (let c = 0; c < w; c += step) {
+      const rh = values[r * w + c];
+      const trap = (rh - rhMin) / span;
+      if (trap < 0.12) continue;
+      const lon = bounds.west + (c / Math.max(w - 1, 1)) * (bounds.east - bounds.west);
+      const lat = bounds.north - (r / Math.max(h - 1, 1)) * (bounds.north - bounds.south);
+      out.push([lon, lat, trap]);
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- component
 
 export default function LiveMap() {
@@ -190,7 +246,9 @@ export default function LiveMap() {
     mode,
     interventionEdgeUids,
     counterfactual,
-    twinMapView,
+    humidityRaster,
+    windRaster,
+    airlockGates,
   } = store;
 
   const selRoute = route?.options[selectedRouteIdx];
@@ -250,9 +308,13 @@ export default function LiveMap() {
     }
   }, [sector?.place, focusMode, demoPlaying, tripPlaying]);
 
-  // Zoom to upgraded streets when counterfactual twin is applied.
+  // Zoom to upgraded streets only when user explicitly previews (once per preview).
+  const lastTwinKey = useRef<string>("");
   useEffect(() => {
     if (mode !== "simulate" || !counterfactual?.affected_segments?.features?.length) return;
+    const key = `${counterfactual.delta.edges_targeted}-${interventionEdgeUids.join(",")}`;
+    if (key === lastTwinKey.current) return;
+    lastTwinKey.current = key;
     let minLon = Infinity;
     let minLat = Infinity;
     let maxLon = -Infinity;
@@ -276,7 +338,7 @@ export default function LiveMap() {
       pitch: 55,
       transitionDuration: 800,
     }));
-  }, [mode, counterfactual?.affected_segments]);
+  }, [mode, counterfactual?.affected_segments, counterfactual?.delta?.edges_targeted, interventionEdgeUids]);
 
   // Camera follows the exposure bubble during focus / demo / playback.
   const cameraFollow = focusMode || demoPlaying || tripPlaying;
@@ -329,6 +391,40 @@ export default function LiveMap() {
     [airRaster]
   );
 
+  const humidityImage = useMemo(
+    () =>
+      humidityRaster
+        ? buildHumidityImage(
+            humidityRaster.values,
+            humidityRaster.shape as [number, number],
+            humidityRaster.rh_min,
+            humidityRaster.rh_max,
+          )
+        : null,
+    [humidityRaster],
+  );
+
+  const windParticles = useMemo(() => {
+    if (!windRaster?.u_ms?.length) return [];
+    const [h, w] = windRaster.shape;
+    const b = windRaster.bounds_wgs84;
+    const out: { lon: number; lat: number; u: number; v: number; speed: number }[] = [];
+    const step = Math.max(2, Math.floor(Math.min(h, w) / 16));
+    for (let r = 0; r < h; r += step) {
+      for (let c = 0; c < w; c += step) {
+        const i = r * w + c;
+        out.push({
+          lon: b.west + (c / Math.max(w - 1, 1)) * (b.east - b.west),
+          lat: b.north - (r / Math.max(h - 1, 1)) * (b.north - b.south),
+          u: windRaster.u_ms[i] ?? 0,
+          v: windRaster.v_ms[i] ?? 0,
+          speed: windRaster.speed_ms[i] ?? 0,
+        });
+      }
+    }
+    return out;
+  }, [windRaster]);
+
   // Lighting follows the real sun position for the current hour.
   const lightingEffect = useMemo(
     () => makeLighting(comfort?.azimuth ?? 135, comfort?.elevation ?? 45),
@@ -363,7 +459,7 @@ export default function LiveMap() {
         id: "comfort",
         image: comfortImage,
         bounds: [b.west, b.south, b.east, b.north] as [number, number, number, number],
-        opacity: 0.5,
+        opacity: layers.humidity && mode === "simulate" ? 0.32 : 0.5,
       })
     );
   }
@@ -398,7 +494,85 @@ export default function LiveMap() {
     );
   }
 
-  // 2c. Live air-quality monitor point (Open-Meteo / OpenWeather).
+  // Humidity trapping overlay — high visibility (Phase 6).
+  if (layers.humidity && humidityImage && humidityRaster) {
+    const b = humidityRaster.bounds_wgs84;
+    deckLayers.push(
+      new BitmapLayer({
+        id: "humidity-field",
+        image: humidityImage,
+        bounds: [b.west, b.south, b.east, b.north] as [number, number, number, number],
+        opacity: 0.88,
+      }),
+    );
+    const humidSpots = humidityHotspots(
+      humidityRaster.values,
+      humidityRaster.shape as [number, number],
+      b,
+      humidityRaster.rh_min,
+      humidityRaster.rh_max,
+    );
+    if (humidSpots.length) {
+      deckLayers.push(
+        new HeatmapLayer({
+          id: "humidity-hotspots",
+          data: humidSpots,
+          getPosition: (d: number[]) => [d[0], d[1]],
+          getWeight: (d: number[]) => d[2],
+          radiusPixels: 88,
+          intensity: 2.2,
+          threshold: 0.05,
+          colorRange: [
+            [34, 211, 238, 0],
+            [56, 189, 248, 180],
+            [168, 85, 247, 220],
+            [236, 72, 153, 240],
+            [190, 24, 93, 255],
+          ],
+        }),
+      );
+    }
+  }
+
+  // 2c. Canyon wind particles (Phase 5-lite).
+  if (layers.wind && windParticles.length) {
+    deckLayers.push(
+      new ScatterplotLayer({
+        id: "wind-particles",
+        data: windParticles,
+        getPosition: (d) => [d.lon, d.lat],
+        getFillColor: (d) => {
+          const t = Math.min(1, d.speed / Math.max(windRaster?.speed_max ?? 3, 0.5));
+          return [56, 189, 248, Math.round(80 + t * 140)];
+        },
+        getRadius: (d) => 4 + Math.min(12, d.speed * 3),
+        radiusMinPixels: 2,
+        radiusMaxPixels: 10,
+        stroked: false,
+        pickable: false,
+      }),
+    );
+  }
+
+  // 2d. Airlock gates (Phase 4).
+  if (airlockGates.length) {
+    deckLayers.push(
+      new ScatterplotLayer({
+        id: "airlock-gates",
+        data: airlockGates,
+        getPosition: (d) => [d.lon, d.lat],
+        getFillColor: [34, 211, 238, 220],
+        getRadius: 14,
+        radiusMinPixels: 8,
+        stroked: true,
+        getLineColor: [255, 255, 255, 240],
+        lineWidthMinPixels: 2,
+        pickable: true,
+      }),
+    );
+  }
+
+  // 2e. Live air-quality monitor point (Open-Meteo / OpenWeather).
   if (layers.air && airRaster?.stations?.length) {
     deckLayers.push(
       new ScatterplotLayer({
@@ -443,14 +617,13 @@ export default function LiveMap() {
         data: heatExposure.worst_segments as any,
         getLineColor: (f: any) => {
           const uid = f.properties?.uid;
-          if (twinActive && selected.has(uid)) return [0, 0, 0, 0];
           if (selected.has(uid)) return [251, 191, 36, 255];
-          return twinActive ? [100, 116, 139, 80] : [248, 113, 113, 200];
+          if (twinActive) return [100, 116, 139, 60];
+          return [248, 113, 113, 200];
         },
         getLineWidth: (f: any) => {
           const uid = f.properties?.uid;
-          if (twinActive && selected.has(uid)) return 0;
-          return selected.has(uid) ? 8 : 4;
+          return selected.has(uid) ? 10 : 4;
         },
         lineWidthMinPixels: 2,
         pickable: mode === "simulate" && !twinActive,
@@ -458,33 +631,55 @@ export default function LiveMap() {
     );
   }
 
-  // 4b. Counterfactual twin — upgraded segments (thick before/after overlay).
+  // Before (red) + after (green) on the SAME streets — side-by-side compare.
   if (mode === "simulate" && counterfactual?.affected_segments?.features?.length) {
     const twinData = counterfactual.affected_segments as any;
-    const isBaseline = twinMapView === "baseline";
     deckLayers.push(
       new GeoJsonLayer({
-        id: "twin-intervention-glow",
+        id: "twin-baseline",
         data: twinData,
-        getLineColor: isBaseline ? [248, 113, 113, 120] : [52, 211, 153, 120],
-        getLineWidth: 22,
+        getLineColor: [248, 113, 113, 220],
+        getLineWidth: 6,
+        getLineOffset: -5,
+        lineWidthMinPixels: 3,
+        capRounded: true,
+        jointRounded: true,
+        pickable: false,
+      }),
+      new GeoJsonLayer({
+        id: "twin-baseline-glow",
+        data: twinData,
+        getLineColor: [248, 113, 113, 70],
+        getLineWidth: 14,
+        getLineOffset: -5,
+        lineWidthMinPixels: 6,
+        capRounded: true,
+        jointRounded: true,
+        pickable: false,
+      }),
+      new GeoJsonLayer({
+        id: "twin-scenario-glow",
+        data: twinData,
+        getLineColor: [52, 211, 153, 90],
+        getLineWidth: 18,
+        getLineOffset: 5,
         lineWidthMinPixels: 10,
         capRounded: true,
         jointRounded: true,
         pickable: false,
       }),
       new GeoJsonLayer({
-        id: "twin-intervention",
+        id: "twin-scenario",
         data: twinData,
         getLineColor: (f: any) => {
-          if (isBaseline) return [248, 113, 113, 255];
           const delta = f.properties?.utci_delta_c ?? 0;
           if (delta >= 4) return [52, 211, 153, 255];
           if (delta >= 2) return [56, 189, 248, 255];
           return [134, 239, 172, 255];
         },
-        getLineWidth: 12,
-        lineWidthMinPixels: 6,
+        getLineWidth: (f: any) => 8 + Math.min(8, (f.properties?.utci_delta_c ?? 0) * 1.5),
+        getLineOffset: 5,
+        lineWidthMinPixels: 5,
         capRounded: true,
         jointRounded: true,
         pickable: true,
@@ -637,6 +832,35 @@ export default function LiveMap() {
         }
       } else {
         pushRouteColorLayers(deckLayers, sel, "route-selected", true);
+      }
+
+      const indoorSegs = sel.indoor_segments ?? [];
+      if (indoorSegs.length) {
+        const onTop = { depthTest: false as const };
+        deckLayers.push(
+          new PathLayer({
+            id: "indoor-tube-glow",
+            data: indoorSegs,
+            getPath: (d) => d.path,
+            getColor: [34, 211, 238, 90],
+            getWidth: 28,
+            widthMinPixels: 14,
+            capRounded: true,
+            jointRounded: true,
+            parameters: onTop,
+          }),
+          new PathLayer({
+            id: "indoor-tube-core",
+            data: indoorSegs,
+            getPath: (d) => d.path,
+            getColor: [186, 230, 253, 200],
+            getWidth: 10,
+            widthMinPixels: 6,
+            capRounded: true,
+            jointRounded: true,
+            parameters: onTop,
+          }),
+        );
       }
 
       if (sel.refuges?.length) {

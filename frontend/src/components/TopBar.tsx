@@ -1,6 +1,4 @@
-import { useEffect, useState } from "react";
 import { useStore, AppMode } from "../store/useStore";
-import { api } from "../api/client";
 import { aqiColor } from "../lib/colors";
 
 const MODES: { id: AppMode; label: string; icon: string }[] = [
@@ -20,14 +18,6 @@ export default function TopBar() {
   const setMode = useStore((s) => s.setMode);
   const env = useStore((s) => s.env);
   const sector = useStore((s) => s.sector);
-  const [backend, setBackend] = useState<string>("");
-
-  useEffect(() => {
-    api
-      .health()
-      .then((h) => setBackend(`${h.compute.device}${h.compute.gpu ? " (GPU)" : ""}`))
-      .catch(() => setBackend("unknown"));
-  }, []);
 
   return (
     <div className="pointer-events-none absolute left-0 right-0 top-0 z-10 flex items-start justify-between p-3">
@@ -39,7 +29,7 @@ export default function TopBar() {
               UAE Climate Mobility
             </h1>
             <p className="text-[10px] text-violet-300/90">
-              {mode === "simulate" ? "Counterfactual Twin · Phase 3" : "Exposure Engine · World Model v2"}
+              {mode === "simulate" ? "City planner · what-if upgrades" : "Heat-safe routing"}
             </p>
           </div>
         </div>
@@ -82,7 +72,6 @@ export default function TopBar() {
         <p className="mt-0.5 text-[10px] text-slate-500">
           {env?.source ?? "…"}
           {env?.fetched_at ? ` · ${envAgeLabel(env.fetched_at)}` : ""}
-          {" · "}{backend}
         </p>
       </div>
     </div>

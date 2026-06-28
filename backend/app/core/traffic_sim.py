@@ -197,6 +197,16 @@ class TrafficSim:
         n = self.n
         ar = xp.arange(n)
 
+        try:
+            from app.core.v2x_optimizer import get_v2x_scenario
+
+            v2x = get_v2x_scenario()
+            slow_k = _SLOW_K * v2x.speed_smoothing()
+            emit_cong = _EMISSION_CONGESTION * v2x.emission_scale()
+        except Exception:  # noqa: BLE001
+            slow_k = _SLOW_K
+            emit_cong = _EMISSION_CONGESTION
+
         # Advance along route (slower when congested), loop at the end.
         self.pos = (self.pos + self.base_speed * self.speed_factor * dt * 20.0) % self.total[self.route_id]
 
@@ -228,16 +238,16 @@ class TrafficSim:
         counts = xp.bincount(flat, minlength=_GRID * _GRID).astype(xp.float32)
         density = counts[flat]
         excess = xp.maximum(density - _CAP, 0.0)
-        self.speed_factor = xp.clip(1.0 - excess * _SLOW_K, _MIN_SPEED_FACTOR, 1.0)
+        self.speed_factor = xp.clip(1.0 - excess * slow_k, _MIN_SPEED_FACTOR, 1.0)
 
         # Emissions: stop-go traffic emits much more; accumulate + decay.
-        emission = _EMISSION_BASE + _EMISSION_CONGESTION * (1.0 - self.speed_factor)
+        emission = _EMISSION_BASE + emit_cong * (1.0 - self.speed_factor)
         em_grid = xp.bincount(
             flat, weights=emission, minlength=_GRID * _GRID
         ).astype(xp.float32).reshape(_GRID, _GRID)
         self.emission_grid = self.emission_grid * _EMISSION_DECAY + em_grid * (1 - _EMISSION_DECAY)
 
-        em_norm = emission / (_EMISSION_BASE + _EMISSION_CONGESTION)
+        em_norm = emission / (_EMISSION_BASE + emit_cong)
 
         return {
             "lon": compute.to_cpu(lon),

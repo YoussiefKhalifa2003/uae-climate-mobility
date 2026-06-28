@@ -35,6 +35,8 @@ from app.models.schemas import (
     CounterfactualRequest,
     CounterfactualResponse,
     WhatIfRequest,
+    V2XScenarioRequest,
+    V2XScenarioResponse,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -145,13 +147,19 @@ def status():
 @app.get("/api/health")
 def health(response: Response):
     if not _require_ready(response):
-        return {"ready": False, "api_features": ["exposure_forecast", "exposure_timeline", "route_risk", "counterfactual_twin"]}
+        return {"ready": False, "api_features": [
+            "exposure_forecast", "exposure_timeline", "route_risk", "counterfactual_twin",
+            "dubai_walk_planner", "humidity_field", "wind_field", "indoor_routing", "v2x_scenario",
+        ]}
     return {
         "status": "ok",
         "compute": compute.backend_info(),
         "sector": geo_engine.sector_meta(),
-        "api_version": "world_model_v2",
-        "api_features": ["exposure_forecast", "exposure_timeline", "route_risk", "counterfactual_twin"],
+        "api_version": "world_model_v3",
+        "api_features": [
+            "exposure_forecast", "exposure_timeline", "route_risk", "counterfactual_twin",
+            "dubai_walk_planner", "humidity_field", "wind_field", "indoor_routing", "v2x_scenario",
+        ],
     }
 
 
@@ -243,6 +251,66 @@ def data_provenance(response: Response):
         "Trip timeline fusing moving sun, shadows, hybrid air, profile speed",
     )
     return provenance_mod.snapshot()
+
+
+@app.get("/api/humidity")
+def humidity_field(response: Response, hour: float = Query(14.0, ge=0, le=24)):
+    if not _require_ready(response):
+        return {"ready": False}
+    from app.core.humidity_physics import humidity_raster_payload
+
+    return humidity_raster_payload(hour)
+
+
+@app.get("/api/wind")
+def wind_field(response: Response, hour: float = Query(14.0, ge=0, le=24)):
+    if not _require_ready(response):
+        return {"ready": False}
+    from app.core.wind_cfd import wind_raster_payload
+
+    return wind_raster_payload(hour)
+
+
+@app.get("/api/airlocks")
+def airlocks(response: Response):
+    if not _require_ready(response):
+        return {"gates": []}
+    from app.core.indoor_network import get_airlocks
+
+    return {"gates": get_airlocks()}
+
+
+@app.post("/api/v2x-scenario", response_model=V2XScenarioResponse)
+def v2x_scenario(req: V2XScenarioRequest, response: Response):
+    if not _require_ready(response):
+        return V2XScenarioResponse(
+            v2x_coordination_active=False,
+            av_penetration_rate=0.0,
+            emission_scale=1.0,
+            speed_smoothing=1.0,
+        )
+    from app.core.v2x_optimizer import set_v2x_scenario
+    from app.core import air_quality
+
+    snap = set_v2x_scenario(active=req.v2x_coordination_active, penetration=req.av_penetration_rate)
+    air_quality.compute_field()
+    from app.core.v2x_optimizer import v2x_snapshot
+
+    return V2XScenarioResponse(**v2x_snapshot())
+
+
+@app.get("/api/v2x-scenario", response_model=V2XScenarioResponse)
+def v2x_scenario_get(response: Response):
+    if not _require_ready(response):
+        return V2XScenarioResponse(
+            v2x_coordination_active=False,
+            av_penetration_rate=0.0,
+            emission_scale=1.0,
+            speed_smoothing=1.0,
+        )
+    from app.core.v2x_optimizer import v2x_snapshot
+
+    return V2XScenarioResponse(**v2x_snapshot())
 
 
 @app.get("/api/comfort")
@@ -407,6 +475,9 @@ def counterfactual(req: CounterfactualRequest, response: Response):
     if not _require_ready(response):
         return {"error": "loading"}
     origin = req.origin.model_dump() if req.origin else None
+    edge_int = None
+    if req.edge_interventions:
+        edge_int = {k: v.value for k, v in req.edge_interventions.items()}
     return analytics.counterfactual_twin(
         req.edge_uids,
         req.added_shade_fraction,
@@ -414,6 +485,8 @@ def counterfactual(req: CounterfactualRequest, response: Response):
         origin=origin,
         isochrone_minutes=req.isochrone_minutes,
         profile=req.profile.value,
+        intervention_type=req.intervention_type.value,
+        edge_interventions=edge_int,
     )
 
 

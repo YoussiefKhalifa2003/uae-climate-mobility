@@ -167,7 +167,7 @@ export default function App() {
       {!focusMode && <Sidebar />}
       {mode === "simulate" ? <TimeBar /> : <UrbanXRay />}
       {!focusMode && mode === "simulate" && <Legend />}
-      {!focusMode && <DataProvenance />}
+      {!focusMode && mode !== "simulate" && <DataProvenance />}
       <MapMoment />
 
       {/* Loading overlay */}

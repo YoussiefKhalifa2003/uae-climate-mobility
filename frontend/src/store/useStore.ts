@@ -10,6 +10,8 @@ import {
   CounterfactualResponse,
   ExposureForecast,
   HeatExposure,
+  HumidityRaster,
+  InterventionType,
   LatLon,
   ProvenanceSnapshot,
   RouteResponse,
@@ -17,6 +19,8 @@ import {
   SectorMeta,
   TravelMode,
   UserProfile,
+  V2XScenario,
+  WindRaster,
 } from "../api/client";
 import { activeTimeline, getActiveExposureContext, horizonTimeline, sampleTimeline } from "../lib/tripExposure";
 
@@ -55,6 +59,8 @@ interface LayerToggles {
   routes: boolean;
   isochrone: boolean;
   worstSegments: boolean;
+  humidity: boolean;
+  wind: boolean;
 }
 
 interface State {
@@ -122,12 +128,22 @@ interface State {
   routeRisk: RouteRiskResponse | null;
   routeRiskLoading: boolean;
 
-  /** Phase 3 counterfactual twin (Simulate mode). */
+  /** Phase 8 Dubai Walk — intervention type + per-edge paint map. */
+  interventionType: InterventionType;
+  edgeInterventions: Record<string, InterventionType>;
   interventionEdgeUids: string[];
   interventionShade: number;
   counterfactual: CounterfactualResponse | null;
   counterfactualLoading: boolean;
   twinMapView: "baseline" | "scenario";
+
+  /** Phase 7 V2X / AV scenario (Simulate). */
+  v2xScenario: V2XScenario | null;
+  v2xLoading: boolean;
+
+  humidityRaster?: HumidityRaster;
+  windRaster?: WindRaster;
+  airlockGates: { lat: number; lon: number; label: string }[];
 
   setMode: (m: AppMode) => void;
   setProfile: (p: UserProfile) => void;
@@ -158,9 +174,13 @@ interface State {
   toggleInterventionEdge: (uid: string) => void;
   clearIntervention: () => void;
   setInterventionShade: (v: number) => void;
+  setInterventionType: (t: InterventionType) => void;
+  paintInterventionEdge: (uid: string, type?: InterventionType) => void;
   runCounterfactual: () => Promise<void>;
   clearCounterfactual: () => void;
   setTwinMapView: (v: "baseline" | "scenario") => void;
+  setV2xScenario: (active: boolean, penetration: number) => Promise<void>;
+  refreshHumidityWind: () => Promise<void>;
 
   init: () => Promise<void>;
   refreshHour: (h: number) => Promise<void>;
@@ -213,6 +233,8 @@ export const useStore = create<State>((set, get) => ({
     routes:    true,
     isochrone: false,
     worstSegments: false,
+    humidity: false,
+    wind: false,
   },
 
   congestion: {},
@@ -236,11 +258,16 @@ export const useStore = create<State>((set, get) => ({
   forecastError: null,
   routeRisk: null,
   routeRiskLoading: false,
+  interventionType: "SolidCanopy",
+  edgeInterventions: {},
   interventionEdgeUids: [],
   interventionShade: 0.7,
   counterfactual: null,
   counterfactualLoading: false,
   twinMapView: "scenario",
+  v2xScenario: null,
+  v2xLoading: false,
+  airlockGates: [],
 
   // ---- mode / ui setters ----
 
@@ -263,14 +290,17 @@ export const useStore = create<State>((set, get) => ({
       demoPlaying: false,
       layers: {
         ...get().layers,
-        isochrone: m === "simulate",
+        isochrone: false,
         worstSegments: m === "simulate",
         comfort: m === "simulate",
+        humidity: m === "simulate",
+        wind: false,
+        routes: m === "navigate",
       },
     });
     if (m === "simulate") {
       get().computeHeatExposure();
-      if (get().origin) get().computeIsochrone(get().isochroneMinutes);
+      void get().refreshHumidityWind();
     }
     const { origin, destination } = get();
     if (m === "navigate" && origin && destination) get().computeRoute({ full: false });
@@ -304,6 +334,7 @@ export const useStore = create<State>((set, get) => ({
       else set({ error: "Set an origin on the map first, then toggle Reachability." });
     }
     if (k === "worstSegments" && next) get().computeHeatExposure();
+    if (k === "humidity" && next) void get().refreshHumidityWind();
     if (k === "comfort" && next) {
       get().refreshHour(s.hour);
       get().computeHeatExposure();
@@ -545,25 +576,58 @@ export const useStore = create<State>((set, get) => ({
       .slice(0, n)
       .map((f) => (f.properties as { uid?: string })?.uid)
       .filter(Boolean) as string[];
-    set({ interventionEdgeUids: uids, counterfactual: null });
+    set({ interventionEdgeUids: uids, edgeInterventions: Object.fromEntries(uids.map((u) => [u, get().interventionType])), counterfactual: null });
   },
 
   toggleInterventionEdge: (uid) => {
+    const type = get().interventionType;
     const cur = get().interventionEdgeUids;
-    const next = cur.includes(uid) ? cur.filter((u) => u !== uid) : [...cur, uid];
-    set({ interventionEdgeUids: next, counterfactual: null });
+    const edgeInt = { ...get().edgeInterventions };
+    if (cur.includes(uid)) {
+      const next = cur.filter((u) => u !== uid);
+      delete edgeInt[uid];
+      set({ interventionEdgeUids: next, edgeInterventions: edgeInt, counterfactual: null });
+    } else {
+      set({
+        interventionEdgeUids: [...cur, uid],
+        edgeInterventions: { ...edgeInt, [uid]: type },
+        counterfactual: null,
+      });
+    }
   },
 
-  clearIntervention: () => set({ interventionEdgeUids: [], counterfactual: null }),
+  clearIntervention: () => set({ interventionEdgeUids: [], edgeInterventions: {}, counterfactual: null }),
 
   setInterventionShade: (v) => set({ interventionShade: Math.max(0.2, Math.min(1, v)), counterfactual: null }),
+
+  setInterventionType: (t) => set({ interventionType: t, counterfactual: null }),
+
+  paintInterventionEdge: (uid, type) => {
+    const it = type ?? get().interventionType;
+    const cur = get().interventionEdgeUids;
+    const next = cur.includes(uid) ? cur : [...cur, uid];
+    set({
+      interventionEdgeUids: next,
+      edgeInterventions: { ...get().edgeInterventions, [uid]: it },
+      counterfactual: null,
+    });
+  },
 
   setTwinMapView: (v) => set({ twinMapView: v }),
 
   clearCounterfactual: () => set({ counterfactual: null }),
 
   runCounterfactual: async () => {
-    const { interventionEdgeUids, interventionShade, hour, origin, isochroneMinutes, profile } = get();
+    const {
+      interventionEdgeUids,
+      interventionShade,
+      interventionType,
+      edgeInterventions,
+      hour,
+      origin,
+      isochroneMinutes,
+      profile,
+    } = get();
     if (!interventionEdgeUids.length) {
       set({ error: "Select streets to upgrade — click red hotspots on the map or use Top 10." });
       return;
@@ -578,11 +642,14 @@ export const useStore = create<State>((set, get) => ({
         origin,
         isochrone_minutes: origin ? isochroneMinutes : undefined,
         profile,
+        intervention_type: interventionType,
+        edge_interventions: Object.keys(edgeInterventions).length ? edgeInterventions : undefined,
       });
+      const walkDelta = res.walkability?.delta ?? 0;
       set({
         counterfactual: res,
-        twinMapView: "scenario",
-        mapMoment: `Twin ready — selected streets −${(res.delta.target_avg_utci_reduction_c ?? 0).toFixed(1)}°C UTCI. Toggle Baseline / After upgrade on the map.`,
+        mapMoment:
+          "Preview ready — red = before, green = after on the same streets. Look at the map legend below.",
       });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Counterfactual failed";
@@ -596,6 +663,45 @@ export const useStore = create<State>((set, get) => ({
       }
     } finally {
       set({ counterfactualLoading: false });
+    }
+  },
+
+  setV2xScenario: async (active, penetration) => {
+    set({ v2xLoading: true });
+    try {
+      const res = await api.v2xScenario({
+        v2x_coordination_active: active,
+        av_penetration_rate: penetration,
+      });
+      set({ v2xScenario: res });
+      await get().refreshAir();
+      await get().refreshCongestion();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "V2X scenario update failed";
+      if (msg.includes("404")) {
+        set({
+          error:
+            "Backend missing /api/v2x-scenario — restart with .\\scripts\\run_backend.ps1 (needs world_model_v3 / Phase 7 routes).",
+        });
+      } else {
+        set({ error: msg });
+      }
+    } finally {
+      set({ v2xLoading: false });
+    }
+  },
+
+  refreshHumidityWind: async () => {
+    const h = get().hour;
+    try {
+      const [humidityRaster, windRaster, airlocks] = await Promise.all([
+        api.humidity(h),
+        api.wind(h),
+        api.airlocks(),
+      ]);
+      set({ humidityRaster, windRaster, airlockGates: airlocks.gates ?? [] });
+    } catch {
+      /* optional overlays */
     }
   },
 
@@ -818,10 +924,8 @@ export const useStore = create<State>((set, get) => ({
         api.comfort(snapped),
       ]);
       set({ env, comfort });
+      void get().refreshHumidityWind();
       if (get().layers.worstSegments || get().mode === "simulate") await get().computeHeatExposure();
-      if (get().mode === "simulate" && get().interventionEdgeUids.length) {
-        void get().runCounterfactual();
-      }
     } catch {
       /* transient */
     }

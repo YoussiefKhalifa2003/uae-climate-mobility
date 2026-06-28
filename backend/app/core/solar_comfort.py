@@ -169,9 +169,10 @@ def mean_radiant_temp(t_air: float, shaded_mask: np.ndarray, elevation_deg: floa
     return mrt.astype(np.float32)
 
 
-def _utci_approx(t_air: float, mrt: np.ndarray, wind: float, rh: float) -> np.ndarray:
+def _utci_approx(t_air: float, mrt: np.ndarray, wind: float | np.ndarray, rh: float) -> np.ndarray:
     """Analytic UTCI surrogate (deg C) used when pythermalcomfort is absent."""
-    v = max(0.5, min(wind, 17.0))
+    w = np.asarray(wind, dtype=np.float32)
+    v = np.clip(w, 0.5, 17.0)
     e = rh / 100.0 * 6.105 * np.exp(17.27 * t_air / (237.7 + t_air)) / 10.0  # kPa
     dtr = mrt - t_air
     utci = (
@@ -313,7 +314,16 @@ def compute_hour(hour: float, env: dict | None = None) -> HourlyField:
 
     shaded = shadow_mask(gd.height_raster, hour)
     mrt = mean_radiant_temp(t_air, shaded, el)
-    utci = utci_raster(t_air, mrt, wind, rh)
+    try:
+        from app.core.wind_cfd import wind_speed_grid
+
+        wgrid = wind_speed_grid(hour)
+    except Exception:  # noqa: BLE001
+        wgrid = None
+    if wgrid is not None and wgrid.shape == mrt.shape:
+        utci = _utci_approx(t_air, mrt, np.clip(wgrid, 0.5, 17.0), rh)
+    else:
+        utci = utci_raster(t_air, mrt, wind, rh)
     wbgt = wbgt_estimate(t_air, rh, shaded, el)
 
     # edge_shade is computed lazily (only routing needs it) to keep the

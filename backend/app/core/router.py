@@ -117,6 +117,8 @@ PRESETS = {
                "description": "Hops between air-conditioned oases with cooling breaks."},
     "SafestP95": {"label": "Safest (P95)", "color": [167, 139, 250, 235], "shade": 2.2, "heat": 3.0, "air": 2.2, "refuge": 1.0,
                   "description": "Optimised for worst-case heat & air (95th percentile forecast)."},
+    "IndoorCool": {"label": "Indoor Cool Path", "color": [34, 211, 238, 235], "shade": 0.5, "heat": 2.5, "air": 1.5, "refuge": 0.2,
+                   "description": "Routes through AC corridors and skywalks; minimises outdoor thermal shock."},
 }
 
 MULTIMODAL_PRESET = {
@@ -176,6 +178,16 @@ def enrich_edges(hour: float) -> dict:
     field = solar_comfort.get_field(hour)
     air = get_field()
 
+    try:
+        from app.core.humidity_physics import routing_humidity_penalty, sample_humidity_utm
+        from app.core.wind_cfd import wind_speed_grid
+
+        wgrid = wind_speed_grid(hour)
+    except Exception:  # noqa: BLE001
+        routing_humidity_penalty = None  # type: ignore
+        sample_humidity_utm = None  # type: ignore
+        wgrid = None
+
     # refuge KD positions in UTM
     refuge_xy = None
     if gd.refuges is not None and len(gd.refuges):
@@ -183,8 +195,35 @@ def enrich_edges(hour: float) -> dict:
 
     enrich: dict[tuple, dict] = {}
     edges = gd.edges
+    walk_graph = gd.graphs.get("walk")
     for (u, v, k), uid, geom in zip(edges.index, edges["uid"], edges.geometry):
         mid = geom.interpolate(0.5, normalized=True)
+        is_indoor = False
+        if walk_graph is not None and walk_graph.has_edge(u, v):
+            ed = walk_graph.get_edge_data(u, v)
+            ek = min(ed, key=lambda kk: ed[kk].get("length", 1.0))
+            is_indoor = bool(ed[ek].get("indoor", False))
+        if hasattr(edges, "columns") and "indoor" in edges.columns:
+            try:
+                is_indoor = is_indoor or bool(edges.loc[(u, v, k), "indoor"])
+            except Exception:  # noqa: BLE001
+                pass
+
+        if is_indoor:
+            from app.core.indoor_network import INDOOR_UTCI_C
+
+            enrich[(u, v, k)] = {
+                "uid": uid,
+                "shade": 1.0,
+                "utci": INDOOR_UTCI_C,
+                "pm25": 8.0,
+                "refuge_dist": 0.0,
+                "indoor": True,
+                "humidity_penalty": 1.0,
+                "evaporative_failure": False,
+            }
+            continue
+
         shade = field.edge_shade.get(uid, 0.0)
         comfort = solar_comfort.sample_utm(mid.x, mid.y, hour)
         pm = sample_pm25_utm(air, mid.x, mid.y)
@@ -192,12 +231,24 @@ def enrich_edges(hour: float) -> dict:
         if refuge_xy is not None:
             dd = (refuge_xy[:, 0] - mid.x) ** 2 + (refuge_xy[:, 1] - mid.y) ** 2
             refuge_dist = float(math.sqrt(dd.min()))
+
+        hum_sample = {"evaporative_failure": False, "humidex_c": 40.0}
+        hum_pen = 1.0
+        if sample_humidity_utm is not None:
+            hum_sample = sample_humidity_utm(mid.x, mid.y, hour, wgrid)
+            if routing_humidity_penalty is not None:
+                hum_pen = routing_humidity_penalty(hum_sample, shade)
+
         enrich[(u, v, k)] = {
             "uid": uid,
             "shade": shade,
             "utci": comfort["utci"],
             "pm25": pm,
             "refuge_dist": refuge_dist,
+            "indoor": False,
+            "humidity_penalty": hum_pen,
+            "evaporative_failure": hum_sample.get("evaporative_failure", False),
+            "humidex_c": hum_sample.get("humidex_c"),
         }
     _enrich_cache[key] = enrich
     return enrich
@@ -237,13 +288,44 @@ def _weight_fn(enrich: dict, profile: dict, preset: dict):
                 shade_deficit = 1.0 - e["shade"]
                 heat_norm = max(0.0, (e["utci"] - 28.0) / 20.0)
                 air_norm = max(0.0, (e["pm25"] - 35.0) / 80.0)
-                refuge_norm = min(1.0, e["refuge_dist"] / 250.0)  # far from refuge = costlier
-                mult = 1.0 + w_shade * shade_deficit + w_heat * heat_norm + w_air * air_norm + w_ref * refuge_norm
-                cost = base * mult
+                refuge_norm = min(1.0, e["refuge_dist"] / 250.0)
+                hum_mult = float(e.get("humidity_penalty", 1.0))
+                indoor_bias = 0.72 if e.get("indoor") else 1.0
+                mult = (
+                    1.0
+                    + w_shade * shade_deficit
+                    + w_heat * heat_norm * hum_mult
+                    + w_air * air_norm
+                    + w_ref * refuge_norm
+                )
+                cost = base * mult * indoor_bias
             best = cost if best is None or cost < best else best
         return best
 
     return fn
+
+
+def _path_indoor_segments(graph, path, enrich: dict) -> list[dict]:
+    """Indoor corridor sub-paths for 3D tube rendering."""
+    from pyproj import Transformer
+
+    gd = get_geo()
+    t = Transformer.from_crs(f"EPSG:{gd.utm_epsg}", "EPSG:4326", always_xy=True)
+    segments: list[dict] = []
+    for u, v in zip(path[:-1], path[1:]):
+        data = graph.get_edge_data(u, v)
+        if not data:
+            continue
+        k = min(data, key=lambda kk: data[kk].get("length", 1.0))
+        e = enrich.get((u, v, k), {})
+        if not (data[k].get("indoor") or e.get("indoor")):
+            continue
+        xa, ya = graph.nodes[u]["x"], graph.nodes[u]["y"]
+        xb, yb = graph.nodes[v]["x"], graph.nodes[v]["y"]
+        lon1, lat1 = t.transform(xa, ya)
+        lon2, lat2 = t.transform(xb, yb)
+        segments.append({"path": [[lon1, lat1], [lon2, lat2]], "layer": "indoor"})
+    return segments
 
 
 def _path_coords(graph, path) -> tuple[list, list, list]:
@@ -720,6 +802,7 @@ def route(
                 "thermal_horizon": enriched.get("thermal_horizon"),
                 "path_colors": enriched.get("path_colors"),
                 "multimodal": False,
+                "indoor_segments": _path_indoor_segments(graph, path, edge_enrich),
             }
         )
 

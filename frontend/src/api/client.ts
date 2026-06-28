@@ -178,6 +178,7 @@ export interface RouteOption {
   multimodal?: boolean;
   thermal_horizon?: ThermalHorizon;
   path_colors?: [number, number, number, number][];
+  indoor_segments?: { path: [number, number][]; layer?: string }[];
 }
 
 export interface RouteRealtimeMeta {
@@ -295,6 +296,42 @@ export interface HeatExposure {
   worst_segments: GeoJSON.FeatureCollection;
 }
 
+export type InterventionType =
+  | "SolidCanopy"
+  | "ActiveMisting"
+  | "XeriscapeForestry"
+  | "LegacyShade";
+
+export interface HumidityRaster {
+  hour: number;
+  shape: [number, number];
+  rh_min: number;
+  rh_max: number;
+  humidex_max: number;
+  failure_pct: number;
+  values: number[];
+  bounds_wgs84: { west: number; south: number; east: number; north: number };
+  stats?: { rh_max_pct: number; dew_point_max_c: number; humidex_max_c: number; failure_pct: number };
+}
+
+export interface WindRaster {
+  hour: number;
+  shape: [number, number];
+  u_ms: number[];
+  v_ms: number[];
+  speed_ms: number[];
+  speed_min: number;
+  speed_max: number;
+  bounds_wgs84: { west: number; south: number; east: number; north: number };
+}
+
+export interface V2XScenario {
+  v2x_coordination_active: boolean;
+  av_penetration_rate: number;
+  emission_scale: number;
+  speed_smoothing: number;
+}
+
 export interface CounterfactualSummary {
   avg_utci_c: number;
   avg_shade_pct: number;
@@ -305,9 +342,16 @@ export interface CounterfactualSummary {
 
 export interface CounterfactualResponse {
   hour: number;
+  intervention_type?: InterventionType;
   added_shade_fraction: number;
   baseline: CounterfactualSummary;
   scenario: CounterfactualSummary;
+  walkability?: {
+    baseline: { score: number; components: Record<string, number> };
+    scenario: { score: number; delta_vs_baseline?: number; components: Record<string, number> };
+    delta: number;
+  };
+  intervention_roi?: { uid: string; intervention: string; utci_reduction_c: number; roi_per_km: number }[];
   delta: {
     avg_utci_reduction_c: number;
     dangerous_network_pct_reduction: number;
@@ -418,7 +462,15 @@ export const api = {
     origin?: LatLon;
     isochrone_minutes?: number;
     profile?: UserProfile;
+    intervention_type?: InterventionType;
+    edge_interventions?: Record<string, InterventionType>;
   }) => post<CounterfactualResponse>("/api/counterfactual", body),
+  humidity: (hour: number) => get<HumidityRaster>(`/api/humidity?hour=${hour}`),
+  wind: (hour: number) => get<WindRaster>(`/api/wind?hour=${hour}`),
+  airlocks: () => get<{ gates: { lat: number; lon: number; label: string }[] }>("/api/airlocks"),
+  v2xScenario: (body: { v2x_coordination_active: boolean; av_penetration_rate: number }) =>
+    post<V2XScenario>("/api/v2x-scenario", body),
+  getV2xScenario: () => get<V2XScenario>("/api/v2x-scenario"),
   trafficStats: () => get<any>("/api/traffic/stats"),
   trafficRoads: () => get<GeoJSON.FeatureCollection>("/api/traffic/roads"),
   trafficCongestion: () => get<Record<string, number>>("/api/traffic/congestion"),

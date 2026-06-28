@@ -7,29 +7,40 @@ const LAYER_META: {
   label: string;
   hint: string;
   provKey?: string;
+  simulateOnly?: boolean;
 }[] = [
-  { key: "buildings", label: "3D Buildings", hint: "OSM footprints", provKey: "buildings" },
-  { key: "traffic", label: "Traffic", hint: "Road congestion lines", provKey: "traffic" },
-  { key: "air", label: "Air Quality", hint: "Live baseline + traffic plume", provKey: "air_map" },
-  { key: "comfort", label: "Heat (UTCI)", hint: "Solar + shadow physics", provKey: "utci" },
-  { key: "refuges", label: "Cool Refuges", hint: "AC / shade POIs", provKey: "refuges" },
-  { key: "routes", label: "Routes", hint: "Multi-objective paths", provKey: undefined },
-  { key: "isochrone", label: "Reachability", hint: "Comfort isochrone", provKey: undefined },
-  { key: "worstSegments", label: "Heat Hotspots", hint: "Click to select streets for twin", provKey: undefined },
+  { key: "buildings", label: "3D Buildings", hint: "Building heights & shadows", provKey: "buildings" },
+  { key: "worstSegments", label: "Hot streets", hint: "Simulate: click to select for upgrade", simulateOnly: true },
+  { key: "humidity", label: "Humidity fog", hint: "Trapped coastal moisture (purple = worst)", simulateOnly: true },
+  { key: "comfort", label: "Heat map", hint: "UTCI comfort field", provKey: "utci" },
+  { key: "air", label: "Air pollution", hint: "Traffic + PM2.5 plume", provKey: "air_map" },
+  { key: "traffic", label: "Traffic", hint: "Road congestion", provKey: "traffic" },
+  { key: "refuges", label: "Cool spots", hint: "Malls, metro, parks", provKey: "refuges" },
+  { key: "routes", label: "Routes", hint: "Navigate mode only" },
+  { key: "wind", label: "Wind", hint: "Canyon breeze (subtle)", simulateOnly: true },
 ];
 
 export default function Legend() {
   const layers = useStore((s) => s.layers);
+  const mode = useStore((s) => s.mode);
   const toggleLayer = useStore((s) => s.toggleLayer);
   const provenance = useStore((s) => s.provenance);
 
   const liveFor = (key?: string) =>
     key ? provenance?.layers.find((l) => l.layer === key)?.live : undefined;
 
+  const visible = LAYER_META.filter((m) => !m.simulateOnly || mode === "simulate");
+
   return (
-    <CollapsibleCornerPanel title="Layers" side="right" className="max-w-[320px]">
+    <CollapsibleCornerPanel
+      title="Layers"
+      side="right"
+      className="max-w-[280px]"
+      defaultOpen={mode !== "simulate"}
+      positionClass={mode === "simulate" ? "bottom-24 right-3" : undefined}
+    >
       <div className="grid grid-cols-1 gap-1">
-        {LAYER_META.map(({ key, label, hint, provKey }) => {
+        {visible.map(({ key, label, hint, provKey }) => {
           const live = liveFor(provKey);
           return (
             <label
@@ -59,32 +70,36 @@ export default function Legend() {
         })}
       </div>
 
-      <div className="mt-3 border-t border-edge pt-2">
-        <div className="mb-1 text-[9px] font-semibold uppercase text-slate-500">Refuge colors</div>
-        <div className="space-y-0.5 text-[9px] text-slate-400">
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-full" style={{ background: `rgb(${refugeColor.railway.slice(0, 3).join(",")})` }} />
-            Blue — transit / metro stations
+      {mode !== "simulate" && (
+        <>
+          <div className="mt-3 border-t border-edge pt-2">
+            <div className="mb-1 text-[9px] font-semibold uppercase text-slate-500">Refuge colors</div>
+            <div className="space-y-0.5 text-[9px] text-slate-400">
+              <div className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full" style={{ background: `rgb(${refugeColor.railway.slice(0, 3).join(",")})` }} />
+                Blue — transit / metro stations
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full" style={{ background: `rgb(${refugeColor.shop.slice(0, 3).join(",")})` }} />
+                Purple — malls & indoor amenities
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full" style={{ background: `rgb(${refugeColor.leisure.slice(0, 3).join(",")})` }} />
+                Green — parks & shaded leisure
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-full" style={{ background: `rgb(${refugeColor.shop.slice(0, 3).join(",")})` }} />
-            Purple — malls & indoor amenities
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-full" style={{ background: `rgb(${refugeColor.leisure.slice(0, 3).join(",")})` }} />
-            Green — parks & shaded leisure
-          </div>
-        </div>
-      </div>
 
-      <div className="mt-2 border-t border-edge pt-2">
-        <div className="mb-1 text-[9px] font-semibold uppercase text-slate-500">UTCI heat bands</div>
-        <div className="flex flex-wrap gap-1 text-[8px]">
-          {Object.entries(heatBandColor).map(([band, color]) => (
-            <span key={band} style={{ color }}>{band}</span>
-          ))}
-        </div>
-      </div>
+          <div className="mt-2 border-t border-edge pt-2">
+            <div className="mb-1 text-[9px] font-semibold uppercase text-slate-500">UTCI heat bands</div>
+            <div className="flex flex-wrap gap-1 text-[8px]">
+              {Object.entries(heatBandColor).map(([band, color]) => (
+                <span key={band} style={{ color }}>{band}</span>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </CollapsibleCornerPanel>
   );
 }

@@ -117,6 +117,13 @@ def compute_field(env: dict | None = None) -> AirField:
     if float(emission.max()) <= 0:
         emission = emission + 1e-3
 
+    try:
+        from app.core.v2x_optimizer import get_v2x_scenario
+
+        emission = emission * get_v2x_scenario().emission_scale()
+    except Exception:  # noqa: BLE001
+        pass
+
     kernel = _dispersion_kernel(emission.shape[0], env["wind_dir_deg"], env["wind_speed_ms"])
     conc = _fft_convolve(emission, kernel)
     conc = xp.clip(conc, 0.0, None)

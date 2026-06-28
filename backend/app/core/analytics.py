@@ -19,6 +19,12 @@ import numpy as np
 
 from app.core import solar_comfort
 from app.core.geo_engine import get_geo
+from app.core.intervention_physics import (
+    InterventionType,
+    apply_intervention,
+    dubai_walkability_index,
+    intervention_roi_per_km,
+)
 from app.core.router import MODE_SPEED, PROFILES, _index_for, _to_utm, enrich_edges
 
 logger = logging.getLogger(__name__)
@@ -37,11 +43,19 @@ def comfort_isochrone(
     *,
     scenario_edge_uids: list[str] | None = None,
     added_shade_fraction: float = 0.0,
+    intervention_type: str = "SolidCanopy",
+    edge_interventions: dict[str, str] | None = None,
 ) -> dict:
     gd = get_geo()
     graph = gd.graphs.get(mode) or next(iter(gd.graphs.values()))
     if scenario_edge_uids:
-        enrich = enrich_edges_scenario(hour, scenario_edge_uids, added_shade_fraction)
+        enrich = enrich_edges_scenario(
+            hour,
+            scenario_edge_uids,
+            added_shade_fraction,
+            intervention_type=intervention_type,
+            edge_interventions=edge_interventions,
+        )
     else:
         enrich = enrich_edges(hour)
     prof = PROFILES.get(profile, PROFILES["default"])
@@ -197,13 +211,19 @@ def _scenario_utci(base_utci: float, added_shade_fraction: float, shaded_utci: f
     return base_utci * (1 - added_shade_fraction) + shaded_utci * added_shade_fraction
 
 
-def enrich_edges_scenario(hour: float, edge_uids: list[str], added_shade_fraction: float) -> dict:
-    """Edge enrich map with shade intervention applied to selected street segments."""
+def enrich_edges_scenario(
+    hour: float,
+    edge_uids: list[str],
+    added_shade_fraction: float = 0.7,
+    *,
+    intervention_type: str = "SolidCanopy",
+    edge_interventions: dict[str, str] | None = None,
+) -> dict:
+    """Edge enrich map with intervention physics on selected street segments."""
     base = enrich_edges(hour)
-    if not edge_uids or added_shade_fraction <= 0:
+    if not edge_uids:
         return base
     uid_to_key = _uid_lookup()
-    shaded_utci = _shaded_target_utci(hour)
     target = set(edge_uids)
     out = dict(base)
     for uid in target:
@@ -213,9 +233,25 @@ def enrich_edges_scenario(hour: float, edge_uids: list[str], added_shade_fractio
         e = out.get(key)
         if e is None:
             continue
-        new_utci = _scenario_utci(float(e["utci"]), added_shade_fraction, shaded_utci)
-        new_shade = min(1.0, float(e["shade"]) + added_shade_fraction)
-        out[key] = {**e, "utci": new_utci, "shade": new_shade}
+        itype = (edge_interventions or {}).get(uid, intervention_type)
+        if itype == "LegacyShade" or intervention_type == "LegacyShade":
+            new_utci, new_shade, _ = apply_intervention(
+                base_utci=float(e["utci"]),
+                base_shade=float(e["shade"]),
+                hour=hour,
+                intervention=InterventionType.LEGACY_SHADE,
+                intensity=added_shade_fraction,
+                legacy_shade_fraction=added_shade_fraction,
+            )
+        else:
+            new_utci, new_shade, _ = apply_intervention(
+                base_utci=float(e["utci"]),
+                base_shade=float(e["shade"]),
+                hour=hour,
+                intervention=itype,
+                intensity=1.0,
+            )
+        out[key] = {**e, "utci": new_utci, "shade": new_shade, "intervention": itype}
     return out
 
 
@@ -253,11 +289,17 @@ def _network_summary(records: list[tuple], hour: float) -> dict:
     }
 
 
-def _collect_edge_records(hour: float, scenario_uids: set[str] | None = None, added_shade_fraction: float = 0.0):
+def _collect_edge_records(
+    hour: float,
+    scenario_uids: set[str] | None = None,
+    added_shade_fraction: float = 0.0,
+    *,
+    intervention_type: str = "SolidCanopy",
+    edge_interventions: dict[str, str] | None = None,
+):
     gd = get_geo()
     enrich = enrich_edges(hour)
     edges = gd.edges
-    shaded_utci = _shaded_target_utci(hour) if scenario_uids else 0.0
     records = []
     for (u, v, k), uid, geom in zip(edges.index, edges["uid"], edges.geometry):
         e = enrich.get((u, v, k))
@@ -266,8 +308,24 @@ def _collect_edge_records(hour: float, scenario_uids: set[str] | None = None, ad
         utci = float(e["utci"])
         shade = float(e["shade"])
         if scenario_uids and uid in scenario_uids:
-            utci = _scenario_utci(utci, added_shade_fraction, shaded_utci)
-            shade = min(1.0, shade + added_shade_fraction)
+            itype = (edge_interventions or {}).get(uid, intervention_type)
+            if itype == "LegacyShade":
+                utci, shade, _ = apply_intervention(
+                    base_utci=utci,
+                    base_shade=shade,
+                    hour=hour,
+                    intervention=InterventionType.LEGACY_SHADE,
+                    intensity=added_shade_fraction,
+                    legacy_shade_fraction=added_shade_fraction,
+                )
+            else:
+                utci, shade, _ = apply_intervention(
+                    base_utci=utci,
+                    base_shade=shade,
+                    hour=hour,
+                    intervention=itype,
+                    intensity=1.0,
+                )
         records.append((uid, utci, shade, geom.length, geom))
     return records
 
@@ -280,11 +338,19 @@ def counterfactual_twin(
     origin=None,
     isochrone_minutes: float | None = None,
     profile: str = "default",
+    intervention_type: str = "SolidCanopy",
+    edge_interventions: dict[str, str] | None = None,
 ) -> dict:
-    """Before/after city twin for shade interventions on selected streets."""
+    """Before/after city twin for Dubai Walk 2040 interventions on selected streets."""
     target = set(edge_uids)
     base_records = _collect_edge_records(hour)
-    scen_records = _collect_edge_records(hour, target, added_shade_fraction)
+    scen_records = _collect_edge_records(
+        hour,
+        target,
+        added_shade_fraction,
+        intervention_type=intervention_type,
+        edge_interventions=edge_interventions,
+    )
 
     baseline = _network_summary([(r[0], r[1], r[2], r[3], r[4]) for r in base_records], hour)
     scenario = _network_summary([(r[0], r[1], r[2], r[3], r[4]) for r in scen_records], hour)
@@ -341,6 +407,8 @@ def counterfactual_twin(
             "walk",
             scenario_edge_uids=edge_uids,
             added_shade_fraction=added_shade_fraction,
+            intervention_type=intervention_type,
+            edge_interventions=edge_interventions,
         )
         base_area = float(base_iso["features"][0]["properties"]["area_km2"]) if base_iso.get("features") else 0.0
         scen_area = float(scen_iso["features"][0]["properties"]["area_km2"]) if scen_iso.get("features") else 0.0
@@ -351,13 +419,41 @@ def counterfactual_twin(
             "area_gain_pct": round(gain, 1),
         }
 
+    baseline_walk = dubai_walkability_index(baseline, iso_area_km2=iso_delta["baseline_area_km2"] if iso_delta else None)
+    scenario_walk = dubai_walkability_index(
+        scenario,
+        iso_area_km2=iso_delta["scenario_area_km2"] if iso_delta else None,
+        baseline_index=baseline_walk["score"],
+    )
+
+    roi_rows = []
+    for b, s in zip(base_target, scen_target):
+        uid, butci, _, ln, _ = b
+        sutci = s[1]
+        itype = (edge_interventions or {}).get(uid, intervention_type)
+        roi_rows.append(
+            {
+                "uid": uid,
+                "intervention": itype,
+                "utci_reduction_c": round(butci - sutci, 2),
+                "roi_per_km": intervention_roi_per_km(butci, sutci, ln, itype),
+            }
+        )
+
     return {
         "hour": hour,
+        "intervention_type": intervention_type,
         "added_shade_fraction": added_shade_fraction,
         "baseline": baseline,
         "scenario": scenario,
         "target_baseline": target_baseline,
         "target_scenario": target_scenario,
+        "walkability": {
+            "baseline": baseline_walk,
+            "scenario": scenario_walk,
+            "delta": scenario_walk["score"] - baseline_walk["score"],
+        },
+        "intervention_roi": roi_rows,
         "delta": {
             "avg_utci_reduction_c": round(baseline["avg_utci_c"] - scenario["avg_utci_c"], 2),
             "dangerous_network_pct_reduction": round(
