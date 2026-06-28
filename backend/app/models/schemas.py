@@ -222,6 +222,8 @@ class RouteRiskResponse(BaseModel):
     profile: str
     temp_spread_c: float = 0.0
     options: list[RouteRiskOption]
+    recommended_label: str | None = None
+    advisory: str | None = None
 
 
 class BestDepartureSlot(BaseModel):
@@ -253,3 +255,50 @@ class WhatIfRequest(BaseModel):
     edge_uids: list[str] = Field(default_factory=list)
     added_shade_fraction: float = Field(default=0.7, ge=0, le=1)
     hour: float = Field(default=14.0, ge=0, le=24)
+
+
+class CounterfactualRequest(BaseModel):
+    """Phase 3 — shade intervention twin with before/after city metrics."""
+
+    edge_uids: list[str] = Field(default_factory=list)
+    added_shade_fraction: float = Field(default=0.7, ge=0, le=1)
+    hour: float = Field(default=14.0, ge=0, le=24)
+    origin: LatLon | None = None
+    isochrone_minutes: float | None = Field(default=None, gt=0, le=60)
+    profile: UserProfile = UserProfile.default
+
+
+class CounterfactualSummary(BaseModel):
+    avg_utci_c: float
+    avg_shade_pct: float
+    dangerous_network_pct: float
+    band_pct: dict[str, float]
+    equity_note: str
+
+
+class CounterfactualDelta(BaseModel):
+    avg_utci_reduction_c: float
+    dangerous_network_pct_reduction: float
+    network_km_upgraded_band: float
+    edges_targeted: int
+    target_km: float = 0.0
+    target_avg_utci_reduction_c: float = 0.0
+    target_dangerous_pct_reduction: float = 0.0
+
+
+class CounterfactualIsochroneDelta(BaseModel):
+    baseline_area_km2: float
+    scenario_area_km2: float
+    area_gain_pct: float
+
+
+class CounterfactualResponse(BaseModel):
+    hour: float
+    added_shade_fraction: float
+    baseline: CounterfactualSummary
+    scenario: CounterfactualSummary
+    target_baseline: CounterfactualSummary | None = None
+    target_scenario: CounterfactualSummary | None = None
+    delta: CounterfactualDelta
+    affected_segments: dict
+    isochrone: CounterfactualIsochroneDelta | None = None

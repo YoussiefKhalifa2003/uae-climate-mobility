@@ -44,6 +44,50 @@ export function BestDepartureChart({ data, onPick }: { data: BestDeparture; onPi
   );
 }
 
+export function CompareBandBars({
+  baseline,
+  scenario,
+}: {
+  baseline: Record<string, number>;
+  scenario: Record<string, number>;
+}) {
+  const order = ["Comfortable", "Moderate", "Strong", "Very Strong", "Extreme"];
+  return (
+    <div className="space-y-1.5">
+      <div className="flex justify-between text-[9px] uppercase text-slate-500">
+        <span>Baseline</span>
+        <span>After intervention</span>
+      </div>
+      {order.map((b) => {
+        const base = baseline[b] ?? 0;
+        const scen = scenario[b] ?? 0;
+        const improved = scen > base + 0.5 && (b === "Comfortable" || b === "Moderate");
+        const reduced = base > scen + 0.5 && (b === "Very Strong" || b === "Extreme");
+        return (
+          <div key={b} className="text-[10px]">
+            <div className="mb-0.5 flex justify-between text-slate-400">
+              <span>{b}</span>
+              <span className="font-mono">
+                <span className="text-slate-500">{base.toFixed(0)}%</span>
+                <span className="mx-1 text-slate-600">→</span>
+                <span className={improved || reduced ? "text-emerald-300" : "text-slate-300"}>{scen.toFixed(0)}%</span>
+              </span>
+            </div>
+            <div className="flex h-2 gap-1">
+              <div className="h-full flex-1 overflow-hidden rounded bg-panel2">
+                <div className="h-full rounded opacity-70" style={{ width: `${base}%`, background: heatBandColor[b] }} />
+              </div>
+              <div className="h-full flex-1 overflow-hidden rounded bg-panel2">
+                <div className="h-full rounded" style={{ width: `${scen}%`, background: heatBandColor[b] }} />
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function BandBars({ bandPct }: { bandPct: Record<string, number> }) {
   const order = ["Comfortable", "Moderate", "Strong", "Very Strong", "Extreme"];
   return (

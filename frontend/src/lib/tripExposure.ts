@@ -144,9 +144,63 @@ export interface ExposureRibbonSegment {
   intersection: boolean;
 }
 
+/** Heat stress used for safety / ribbon when P95 bands are present. */
+export function effectiveHeatUtci(f: ExposureTimelineFrame): number {
+  return f.utci_p95 ?? f.utci;
+}
+
+export function timelineHasP95Bands(timeline: ExposureTimelineFrame[]): boolean {
+  return timeline.some((f) => f.utci_p95 != null);
+}
+
+/** Best delayed-departure slot by P95 heat-threshold confidence. */
+export function findBestLeaveSlot(slots: ExposureForecastSlot[] | undefined) {
+  if (!slots?.length) return null;
+  let best = slots[0];
+  for (const s of slots) {
+    const conf = s.confidence_pct ?? 0;
+    const bestConf = best.confidence_pct ?? 0;
+    if (conf > bestConf || (conf === bestConf && (s.peak_utci_p95 ?? s.peak_utci) < (best.peak_utci_p95 ?? best.peak_utci))) {
+      best = s;
+    }
+  }
+  return best;
+}
+
+export interface UncertaintyBucket {
+  t_min: number;
+  utci_p50: number;
+  utci_p95: number;
+  band_width_c: number;
+}
+
+/** Downsample timeline into buckets for the uncertainty strip (data-driven, not decorative). */
+export function buildUncertaintyBuckets(timeline: ExposureTimelineFrame[], maxBuckets = 24): UncertaintyBucket[] {
+  if (!timelineHasP95Bands(timeline)) return [];
+  const n = Math.min(maxBuckets, timeline.length);
+  const step = Math.max(1, Math.floor(timeline.length / n));
+  const buckets: UncertaintyBucket[] = [];
+  for (let i = 0; i < timeline.length; i += step) {
+    const f = timeline[i];
+    const p50 = f.utci_p50 ?? f.utci;
+    const p95 = f.utci_p95 ?? f.utci;
+    buckets.push({
+      t_min: f.t_min,
+      utci_p50: p50,
+      utci_p95: p95,
+      band_width_c: f.band_width_c ?? Math.max(0, p95 - p50),
+    });
+  }
+  return buckets;
+}
+
 /** Path segments coloured by per-minute exposure along the trip. */
-export function buildExposureRibbon(timeline: ExposureTimelineFrame[]): ExposureRibbonSegment[] {
+export function buildExposureRibbon(
+  timeline: ExposureTimelineFrame[],
+  opts?: { worstCase?: boolean },
+): ExposureRibbonSegment[] {
   if (timeline.length < 2) return [];
+  const worstCase = opts?.worstCase && timelineHasP95Bands(timeline);
   const segs: ExposureRibbonSegment[] = [];
   for (let i = 0; i < timeline.length - 1; i++) {
     const a = timeline[i];
@@ -156,8 +210,8 @@ export function buildExposureRibbon(timeline: ExposureTimelineFrame[]): Exposure
         [a.lon, a.lat],
         [b.lon, b.lat],
       ],
-      utci: a.utci,
-      pm25: a.pm25,
+      utci: worstCase ? effectiveHeatUtci(a) : a.utci,
+      pm25: worstCase && a.pm25_p95 != null ? a.pm25_p95 : a.pm25,
       t_min: a.t_min,
       t_max: b.t_min,
       shaded: a.shade_pct >= 50,
@@ -182,10 +236,12 @@ export interface HazardWall {
   kind: "heat" | "air" | "both";
 }
 
-function frameIsSafe(f: ExposureTimelineFrame, warn: number, critical: number): boolean {
-  const heatOk = f.utci < warn;
-  const airOk = f.pm25 < 55 && f.overlap_score < 0.45;
-  const notCritical = f.utci < critical && !f.intersection;
+function frameIsSafe(f: ExposureTimelineFrame, warn: number, critical: number, useP95: boolean): boolean {
+  const heat = useP95 ? effectiveHeatUtci(f) : f.utci;
+  const pm = useP95 && f.pm25_p95 != null ? f.pm25_p95 : f.pm25;
+  const heatOk = heat < warn;
+  const airOk = pm < 55 && f.overlap_score < 0.45;
+  const notCritical = heat < critical && !f.intersection;
   return heatOk && airOk && notCritical;
 }
 
@@ -193,9 +249,11 @@ function frameIsSafe(f: ExposureTimelineFrame, warn: number, critical: number): 
 export function computeSafeWindows(
   timeline: ExposureTimelineFrame[],
   thresholds: { warn: number; critical: number },
+  opts?: { useP95Envelope?: boolean },
 ): { safe: SafeWindow[]; hazards: HazardWall[] } {
   if (!timeline.length) return { safe: [], hazards: [] };
 
+  const useP95 = opts?.useP95Envelope ?? timelineHasP95Bands(timeline);
   const safe: SafeWindow[] = [];
   const hazards: HazardWall[] = [];
   let safeStart: ExposureTimelineFrame | null = null;
@@ -246,12 +304,14 @@ export function computeSafeWindows(
   };
 
   for (const f of timeline) {
-    const isSafe = frameIsSafe(f, thresholds.warn, thresholds.critical);
+    const heat = useP95 ? effectiveHeatUtci(f) : f.utci;
+    const pm = useP95 && f.pm25_p95 != null ? f.pm25_p95 : f.pm25;
+    const isSafe = frameIsSafe(f, thresholds.warn, thresholds.critical, useP95);
     const isHazard =
       f.intersection ||
-      f.utci >= thresholds.critical ||
+      heat >= thresholds.critical ||
       f.overlap_score >= 0.55 ||
-      (f.utci >= thresholds.warn && f.pm25 >= 50);
+      (heat >= thresholds.warn && pm >= 50);
 
     if (isSafe) {
       flushHazard(f);
@@ -263,10 +323,10 @@ export function computeSafeWindows(
 
     if (isHazard) {
       if (!hazardStart) hazardStart = f;
-      hazardPeakUtci = Math.max(hazardPeakUtci, f.utci);
-      hazardPeakPm = Math.max(hazardPeakPm, f.pm25);
-      if (f.utci >= thresholds.warn) hazardHeat = true;
-      if (f.pm25 >= 45 || f.intersection) hazardAir = true;
+      hazardPeakUtci = Math.max(hazardPeakUtci, heat);
+      hazardPeakPm = Math.max(hazardPeakPm, pm);
+      if (heat >= thresholds.warn) hazardHeat = true;
+      if (pm >= 45 || f.intersection) hazardAir = true;
     } else {
       flushHazard(f);
     }

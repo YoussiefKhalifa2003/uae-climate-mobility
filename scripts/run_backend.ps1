@@ -17,4 +17,4 @@ if (-not (Test-Path "$root\.env")) {
     Write-Host "Created .env from template." -ForegroundColor Green
 }
 
-& "$root\backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+& "$root\backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 8001

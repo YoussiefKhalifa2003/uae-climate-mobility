@@ -32,6 +32,8 @@ from app.models.schemas import (
     RouteResponse,
     RouteRiskRequest,
     RouteRiskResponse,
+    CounterfactualRequest,
+    CounterfactualResponse,
     WhatIfRequest,
 )
 
@@ -73,13 +75,16 @@ def _warm() -> None:
         uae_hour = (utc.hour + 4) % 24 + utc.minute / 60
         get_field(uae_hour)
 
-        logger.info("Comfort ready. Starting traffic sim …")
+        # Unblock the frontend as soon as geo + comfort exist; traffic/air finish in background.
+        _ready = True
+        logger.info("Core geo ready — API accepting requests.")
+
+        logger.info("Starting traffic sim …")
         sim = get_sim()
 
         logger.info("Traffic sim ready (%d agents). Computing air field …", sim.n)
         air_quality.compute_field()
 
-        _ready = True
         logger.info("Warm-up complete — platform is ready.")
 
         # Precompute the full day of comfort fields in the background so the
@@ -140,13 +145,13 @@ def status():
 @app.get("/api/health")
 def health(response: Response):
     if not _require_ready(response):
-        return {"ready": False, "api_features": ["exposure_forecast", "exposure_timeline", "route_risk"]}
+        return {"ready": False, "api_features": ["exposure_forecast", "exposure_timeline", "route_risk", "counterfactual_twin"]}
     return {
         "status": "ok",
         "compute": compute.backend_info(),
         "sector": geo_engine.sector_meta(),
         "api_version": "world_model_v2",
-        "api_features": ["exposure_forecast", "exposure_timeline", "route_risk"],
+        "api_features": ["exposure_forecast", "exposure_timeline", "route_risk", "counterfactual_twin"],
     }
 
 
@@ -395,6 +400,21 @@ def whatif(req: WhatIfRequest, response: Response):
     if not _require_ready(response):
         return {"error": "loading"}
     return analytics.what_if(req.edge_uids, req.added_shade_fraction, req.hour)
+
+
+@app.post("/api/counterfactual", response_model=CounterfactualResponse)
+def counterfactual(req: CounterfactualRequest, response: Response):
+    if not _require_ready(response):
+        return {"error": "loading"}
+    origin = req.origin.model_dump() if req.origin else None
+    return analytics.counterfactual_twin(
+        req.edge_uids,
+        req.added_shade_fraction,
+        req.hour,
+        origin=origin,
+        isochrone_minutes=req.isochrone_minutes,
+        profile=req.profile.value,
+    )
 
 
 # ------------------------------------------------------------- traffic WS

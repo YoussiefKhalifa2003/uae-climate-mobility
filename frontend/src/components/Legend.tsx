@@ -15,7 +15,7 @@ const LAYER_META: {
   { key: "refuges", label: "Cool Refuges", hint: "AC / shade POIs", provKey: "refuges" },
   { key: "routes", label: "Routes", hint: "Multi-objective paths", provKey: undefined },
   { key: "isochrone", label: "Reachability", hint: "Comfort isochrone", provKey: undefined },
-  { key: "worstSegments", label: "Heat Hotspots", hint: "Hottest street segments", provKey: undefined },
+  { key: "worstSegments", label: "Heat Hotspots", hint: "Click to select streets for twin", provKey: undefined },
 ];
 
 export default function Legend() {

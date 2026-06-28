@@ -2,15 +2,18 @@ import { create } from "zustand";
 import {
   api,
   API_BASE,
+  fetchWithTimeout,
   AirRaster,
   BestDeparture,
   ComfortRaster,
   EnvSnapshot,
+  CounterfactualResponse,
   ExposureForecast,
   HeatExposure,
   LatLon,
   ProvenanceSnapshot,
   RouteResponse,
+  RouteRiskResponse,
   SectorMeta,
   TravelMode,
   UserProfile,
@@ -115,6 +118,17 @@ interface State {
   forecastLoading: boolean;
   forecastError: string | null;
 
+  /** P50/P95 route comparison from /api/route-risk (Phase 2). */
+  routeRisk: RouteRiskResponse | null;
+  routeRiskLoading: boolean;
+
+  /** Phase 3 counterfactual twin (Simulate mode). */
+  interventionEdgeUids: string[];
+  interventionShade: number;
+  counterfactual: CounterfactualResponse | null;
+  counterfactualLoading: boolean;
+  twinMapView: "baseline" | "scenario";
+
   setMode: (m: AppMode) => void;
   setProfile: (p: UserProfile) => void;
   setTravelMode: (m: TravelMode) => void;
@@ -139,6 +153,14 @@ interface State {
   setMapMoment: (msg: string | null) => void;
   fetchExposureForecast: () => Promise<void>;
   setForecastDelay: (min: number) => void;
+  fetchRouteRisk: () => Promise<void>;
+  seedInterventionFromWorst: (n?: number) => void;
+  toggleInterventionEdge: (uid: string) => void;
+  clearIntervention: () => void;
+  setInterventionShade: (v: number) => void;
+  runCounterfactual: () => Promise<void>;
+  clearCounterfactual: () => void;
+  setTwinMapView: (v: "baseline" | "scenario") => void;
 
   init: () => Promise<void>;
   refreshHour: (h: number) => Promise<void>;
@@ -212,6 +234,13 @@ export const useStore = create<State>((set, get) => ({
   forecastDelayMin: 0,
   forecastLoading: false,
   forecastError: null,
+  routeRisk: null,
+  routeRiskLoading: false,
+  interventionEdgeUids: [],
+  interventionShade: 0.7,
+  counterfactual: null,
+  counterfactualLoading: false,
+  twinMapView: "scenario",
 
   // ---- mode / ui setters ----
 
@@ -225,6 +254,8 @@ export const useStore = create<State>((set, get) => ({
       exposureForecast: null,
       forecastDelayMin: 0,
       forecastError: null,
+      counterfactual: null,
+      interventionEdgeUids: [],
       selectedRouteIdx: 0,
       tripPlaying: false,
       tripMinute: 0,
@@ -483,6 +514,91 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  fetchRouteRisk: async () => {
+    const { origin, destination, travelMode, profile, hour, route } = get();
+    if (!origin || !destination || !route?.options.length) return;
+
+    set({ routeRiskLoading: true });
+    try {
+      const risk = await api.routeRisk({
+        origin,
+        destination,
+        mode: travelMode,
+        profile,
+        hour,
+        live: true,
+        include_horizon: false,
+        include_multimodal: false,
+      });
+      set({ routeRisk: risk });
+    } catch {
+      /* non-fatal — routes still usable without risk comparison */
+    } finally {
+      set({ routeRiskLoading: false });
+    }
+  },
+
+  seedInterventionFromWorst: (n = 10) => {
+    const he = get().heatExposure;
+    if (!he?.worst_segments?.features?.length) return;
+    const uids = he.worst_segments.features
+      .slice(0, n)
+      .map((f) => (f.properties as { uid?: string })?.uid)
+      .filter(Boolean) as string[];
+    set({ interventionEdgeUids: uids, counterfactual: null });
+  },
+
+  toggleInterventionEdge: (uid) => {
+    const cur = get().interventionEdgeUids;
+    const next = cur.includes(uid) ? cur.filter((u) => u !== uid) : [...cur, uid];
+    set({ interventionEdgeUids: next, counterfactual: null });
+  },
+
+  clearIntervention: () => set({ interventionEdgeUids: [], counterfactual: null }),
+
+  setInterventionShade: (v) => set({ interventionShade: Math.max(0.2, Math.min(1, v)), counterfactual: null }),
+
+  setTwinMapView: (v) => set({ twinMapView: v }),
+
+  clearCounterfactual: () => set({ counterfactual: null }),
+
+  runCounterfactual: async () => {
+    const { interventionEdgeUids, interventionShade, hour, origin, isochroneMinutes, profile } = get();
+    if (!interventionEdgeUids.length) {
+      set({ error: "Select streets to upgrade — click red hotspots on the map or use Top 10." });
+      return;
+    }
+
+    set({ counterfactualLoading: true, error: undefined });
+    try {
+      const res = await api.counterfactual({
+        edge_uids: interventionEdgeUids,
+        added_shade_fraction: interventionShade,
+        hour,
+        origin,
+        isochrone_minutes: origin ? isochroneMinutes : undefined,
+        profile,
+      });
+      set({
+        counterfactual: res,
+        twinMapView: "scenario",
+        mapMoment: `Twin ready — selected streets −${(res.delta.target_avg_utci_reduction_c ?? 0).toFixed(1)}°C UTCI. Toggle Baseline / After upgrade on the map.`,
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Counterfactual failed";
+      if (msg.includes("404")) {
+        set({
+          error:
+            "Backend is missing /api/counterfactual — restart the backend (scripts/run_backend.ps1) so Phase 3 routes load.",
+        });
+      } else {
+        set({ error: msg });
+      }
+    } finally {
+      set({ counterfactualLoading: false });
+    }
+  },
+
   setDepartureHour: async (h, opts) => {
     const snapped = snapUAEHour(h);
     const { origin, destination, travelMode, profile, selectedRouteIdx, route } = get();
@@ -500,6 +616,7 @@ export const useStore = create<State>((set, get) => ({
       skipNextRouteRefresh: true,
       exposureForecast: null,
       forecastDelayMin: 0,
+      routeRisk: null,
     });
 
     _exposureAbort?.abort();
@@ -533,6 +650,7 @@ export const useStore = create<State>((set, get) => ({
           : o,
       );
       set({ route: { ...cur, options } });
+      void get().fetchRouteRisk();
     } catch {
       /* aborted or failed */
     } finally {
@@ -610,15 +728,29 @@ export const useStore = create<State>((set, get) => ({
     // Poll /api/status until the geo warm-up is done (it runs in a background
     // thread so the server accepts requests immediately).
     const waitForReady = async (): Promise<void> => {
+      let unreachable = 0;
       for (let attempt = 0; attempt < 120; attempt++) {
         try {
-          const s = await fetch(`${API_BASE}/api/status`);
+          const s = await fetchWithTimeout(`${API_BASE}/api/status`, { timeoutMs: 5_000 });
           const j = await s.json();
-          if (j.ready) return;
-        } catch { /* server still booting */ }
+          unreachable = 0;
+          if (j.ready) {
+            if (j.error) {
+              set({ error: `Backend started with warnings: ${j.error}` });
+            }
+            return;
+          }
+        } catch {
+          unreachable += 1;
+          if (unreachable >= 8) {
+            throw new Error(
+              "Cannot reach backend — run .\\scripts\\run_backend.ps1 in a terminal, then refresh this page.",
+            );
+          }
+        }
         await new Promise((r) => setTimeout(r, 1500));
       }
-      throw new Error("Backend did not become ready within 3 minutes.");
+      throw new Error("Backend did not become ready within 3 minutes — try restarting the backend.");
     };
 
     try {
@@ -686,7 +818,10 @@ export const useStore = create<State>((set, get) => ({
         api.comfort(snapped),
       ]);
       set({ env, comfort });
-      if (get().layers.worstSegments || get().mode === "simulate") get().computeHeatExposure();
+      if (get().layers.worstSegments || get().mode === "simulate") await get().computeHeatExposure();
+      if (get().mode === "simulate" && get().interventionEdgeUids.length) {
+        void get().runCounterfactual();
+      }
     } catch {
       /* transient */
     }
@@ -729,7 +864,7 @@ export const useStore = create<State>((set, get) => ({
     _routeAbort?.abort();
     _routeAbort = new AbortController();
 
-    set({ routing: true, error: undefined, tripPlaying: false, tripMinute: 0, tripCityHourSnap: -1, exposureForecast: null, forecastDelayMin: 0, forecastError: null });
+    set({ routing: true, error: undefined, tripPlaying: false, tripMinute: 0, tripCityHourSnap: -1, exposureForecast: null, forecastDelayMin: 0, forecastError: null, routeRisk: null });
     try {
       const route = await api.route(
         {
@@ -752,6 +887,7 @@ export const useStore = create<State>((set, get) => ({
       set({ route, selectedRouteIdx: selectedIdx, routeUpdatedAt: Date.now(), exposure4DEnabled: full || get().exposure4DEnabled });
       if (full) {
         void get().ensureTripExposure();
+        void get().fetchRouteRisk();
       }
       // Best-departure scans 17 hours — only run on explicit user action, not auto-refresh.
     } catch (e: any) {
@@ -795,6 +931,9 @@ export const useStore = create<State>((set, get) => ({
     try {
       const he = await api.heatExposure(get().hour);
       set({ heatExposure: he });
+      if (get().mode === "simulate" && get().interventionEdgeUids.length === 0) {
+        get().seedInterventionFromWorst(10);
+      }
     } catch {
       /* non-fatal */
     }

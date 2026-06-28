@@ -977,7 +977,57 @@ def route_risk(
             }
         )
 
-    return {"hour": hour, "profile": profile, "temp_spread_c": scen.get("temp_spread_c", 0), "options": options}
+    recommended, advisory = _route_risk_recommendation(options, float(scen.get("temp_spread_c", 0)))
+    return {
+        "hour": hour,
+        "profile": profile,
+        "temp_spread_c": scen.get("temp_spread_c", 0),
+        "options": options,
+        "recommended_label": recommended,
+        "advisory": advisory,
+    }
+
+
+def _route_risk_recommendation(options: list[dict], temp_spread_c: float) -> tuple[str | None, str | None]:
+    """Pick a route under the P95 envelope and explain why."""
+    if not options:
+        return None, None
+
+    by_conf = sorted(options, key=lambda o: (-o["confidence_pct"], o.get("duration_min") or 999))
+    balanced = next((o for o in options if o["label"] == "Balanced"), None)
+    safest = next((o for o in options if o["label"] == "Safest (P95)"), None)
+    best = by_conf[0]
+    recommended = best["label"]
+
+    if safest and balanced:
+        safer_peak = safest["peak_utci_p95"] + 1.5 <= balanced["peak_utci_p95"]
+        safer_conf = safest["confidence_pct"] >= balanced["confidence_pct"] + 5
+        if safer_peak or safer_conf:
+            recommended = "Safest (P95)"
+
+    parts: list[str] = []
+    if temp_spread_c >= 1.5:
+        parts.append(f"Open-Meteo spread is ±{temp_spread_c:.1f}°C today — plan for the hot tail, not just average conditions.")
+
+    rec = next((o for o in options if o["label"] == recommended), best)
+    if recommended == "Safest (P95)" and balanced:
+        parts.append(
+            f"Safest (P95) limits worst-case peak to {rec['peak_utci_p95']:.0f}°C "
+            f"({rec['confidence_pct']:.0f}% confidence) vs {balanced['peak_utci_p95']:.0f}°C "
+            f"({balanced['confidence_pct']:.0f}%) on Balanced."
+        )
+    elif rec["confidence_pct"] < 55:
+        parts.append(
+            f"All routes look risky under a hot forecast (best: {rec['confidence_pct']:.0f}%). "
+            "Use X-Ray → Load 60-min forecast to find a cooler leave window."
+        )
+    else:
+        parts.append(
+            f"{rec['label']} is the best fit under uncertainty "
+            f"({rec['confidence_pct']:.0f}% confidence, peak {rec['peak_utci_p95']:.0f}°C P95)."
+        )
+
+    return recommended, " ".join(parts)
 
 
 def best_departure(origin, destination, mode: str = "walk", profile: str = "default") -> dict:

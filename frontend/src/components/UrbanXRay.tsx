@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore, getCurrentUAEHour, getMaxSelectableUAEHour, snapUAEHour } from "../store/useStore";
 import {
   activeTimeline,
+  buildUncertaintyBuckets,
   computeSafeWindows,
+  findBestLeaveSlot,
   fmtCityHour,
   fmtTripClock,
   combinedStressNorm,
@@ -10,12 +12,47 @@ import {
   horizonTimeline,
   pickForecastSlot,
   sampleTimeline,
+  timelineHasP95Bands,
   tripDurationMin,
 } from "../lib/tripExposure";
-import { heatBandColor } from "../lib/colors";
+import { heatBandColor, utciColor } from "../lib/colors";
 
 function fmtHour(h: number): string {
   return fmtCityHour(h);
+}
+
+function UncertaintyStrip({ timeline }: { timeline: ReturnType<typeof activeTimeline> }) {
+  const buckets = useMemo(() => buildUncertaintyBuckets(timeline), [timeline]);
+  if (!buckets.length) return null;
+
+  const maxBand = Math.max(...buckets.map((b) => b.band_width_c), 0.5);
+  const warn = 38;
+
+  return (
+    <div className="mt-1">
+      <div className="mb-0.5 flex justify-between text-[9px] text-slate-500">
+        <span>P95 uncertainty along route</span>
+        <span className="font-mono text-slate-400">±{maxBand.toFixed(1)}°C max</span>
+      </div>
+      <div className="flex h-3 gap-px overflow-hidden rounded-sm bg-panel2">
+        {buckets.map((b, i) => {
+          const [r, g, bl] = utciColor(b.utci_p95, 255);
+          const alpha = 0.35 + (b.band_width_c / maxBand) * 0.65;
+          return (
+            <div
+              key={`${b.t_min}-${i}`}
+              className="min-w-0 flex-1"
+              title={`${b.t_min.toFixed(0)} min: ${b.utci_p50.toFixed(0)}–${b.utci_p95.toFixed(0)}°C UTCI`}
+              style={{
+                background: `rgba(${r},${g},${bl},${alpha})`,
+                boxShadow: b.utci_p95 >= warn ? `inset 0 -2px 0 rgba(248,113,113,${0.4 + alpha * 0.4})` : undefined,
+              }}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function ForecastSection({
@@ -35,6 +72,8 @@ function ForecastSection({
     () => pickForecastSlot(exposureForecast?.slots, forecastDelayMin),
     [exposureForecast, forecastDelayMin],
   );
+  const bestLeave = useMemo(() => findBestLeaveSlot(exposureForecast?.slots), [exposureForecast]);
+  const setForecastDelay = useStore((s) => s.setForecastDelay);
 
   return (
     <div className="rounded-lg border border-sky-500/20 bg-sky-950/30 p-2.5">
@@ -96,10 +135,29 @@ function ForecastSection({
           </div>
           {forecastSlot?.confidence_pct != null && (
             <p className="mt-1.5 rounded-md bg-violet-950/50 px-2 py-1 text-[10px] text-violet-200">
-              {forecastSlot.confidence_pct >= 70 ? "✓" : "⚠"} {forecastSlot.confidence_pct.toFixed(0)}% confidence
-              trip stays under heat threshold (P95 envelope)
+              {forecastSlot.confidence_pct >= 70 ? "✓" : "⚠"}{" "}
+              {forecastSlot.confidence_pct.toFixed(0)}% of trip minutes stay below your heat threshold even if weather
+              runs hot (P95 envelope)
+              {forecastSlot.peak_utci_p95 != null && (
+                <span className="text-violet-300/80">
+                  {" "}
+                  · worst-case peak {forecastSlot.peak_utci_p95.toFixed(0)}°C
+                </span>
+              )}
             </p>
           )}
+          {bestLeave &&
+            bestLeave.delay_minutes !== forecastDelayMin &&
+            (bestLeave.confidence_pct ?? 0) > (forecastSlot?.confidence_pct ?? 0) + 3 && (
+              <button
+                type="button"
+                onClick={() => setForecastDelay(bestLeave.delay_minutes)}
+                className="mt-1.5 w-full rounded-md border border-emerald-500/40 bg-emerald-950/40 px-2 py-1.5 text-left text-[10px] text-emerald-200 hover:bg-emerald-900/40"
+              >
+                Better window: leave in {bestLeave.delay_minutes === 0 ? "now" : `+${bestLeave.delay_minutes} min`} (
+                {bestLeave.confidence_pct?.toFixed(0)}% safe vs {forecastSlot?.confidence_pct?.toFixed(0) ?? "?"}% now)
+              </button>
+            )}
           {forecastSlot && forecastDelayMin > 0 && (
             <p className="mt-1.5 text-[10px] text-slate-300">
               vs leaving now:{" "}
@@ -159,7 +217,7 @@ export default function UrbanXRay() {
 
   const thresholds = horizon?.thresholds ?? { warn: 38, critical: 46 };
   const { safe, hazards } = useMemo(
-    () => computeSafeWindows(timeline, thresholds),
+    () => computeSafeWindows(timeline, thresholds, { useP95Envelope: timelineHasP95Bands(timeline) }),
     [timeline, thresholds],
   );
 
@@ -341,19 +399,14 @@ export default function UrbanXRay() {
                 onChange={(e) => store.setTripMinute(parseFloat(e.target.value))}
                 className="w-full accent-emerald-500"
               />
+              {frame?.utci_p95 != null && timeline.length > 0 && (
+                <UncertaintyStrip timeline={timeline} />
+              )}
               {frame?.utci_p95 != null && (
-                <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-400">
-                  <span>P50–P95 UTCI</span>
-                  <div className="relative h-1.5 flex-1 rounded-full bg-panel2">
-                    <div
-                      className="absolute h-full rounded-full bg-gradient-to-r from-emerald-400/80 to-red-400/80"
-                      style={{ left: "10%", right: "10%" }}
-                    />
-                  </div>
-                  <span className="font-mono text-slate-300">
-                    {frame.utci.toFixed(0)}–{frame.utci_p95.toFixed(0)}°C
-                  </span>
-                </div>
+                <p className="mt-0.5 text-[10px] font-mono text-slate-400">
+                  At {fmtTripClock(tripMinute)}: {frame.utci.toFixed(0)}°C typical · {frame.utci_p95.toFixed(0)}°C
+                  worst-case
+                </p>
               )}
 
               {bestDeparture && (

@@ -1,7 +1,13 @@
 // Typed REST client for the backend gateway.
 
-export const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? "http://localhost:8000";
-export const WS_BASE = API_BASE.replace(/^http/, "ws");
+/** Dev: empty string → Vite proxies /api to the backend. Prod: set VITE_API_BASE. */
+export const API_BASE =
+  import.meta.env.VITE_API_BASE ??
+  (import.meta.env.DEV ? "" : "http://127.0.0.1:8000");
+
+export const WS_BASE = API_BASE
+  ? API_BASE.replace(/^http/, "ws")
+  : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
 
 export type LatLon = { lat: number; lon: number };
 export type TravelMode = "walk" | "drive" | "bike";
@@ -157,6 +163,8 @@ export interface RouteRiskResponse {
   profile: string;
   temp_spread_c: number;
   options: RouteRiskOption[];
+  recommended_label?: string | null;
+  advisory?: string | null;
 }
 
 export interface RouteOption {
@@ -287,8 +295,53 @@ export interface HeatExposure {
   worst_segments: GeoJSON.FeatureCollection;
 }
 
-async function get<T>(path: string): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`);
+export interface CounterfactualSummary {
+  avg_utci_c: number;
+  avg_shade_pct: number;
+  dangerous_network_pct: number;
+  band_pct: Record<string, number>;
+  equity_note: string;
+}
+
+export interface CounterfactualResponse {
+  hour: number;
+  added_shade_fraction: number;
+  baseline: CounterfactualSummary;
+  scenario: CounterfactualSummary;
+  delta: {
+    avg_utci_reduction_c: number;
+    dangerous_network_pct_reduction: number;
+    network_km_upgraded_band: number;
+    edges_targeted: number;
+    target_km?: number;
+    target_avg_utci_reduction_c?: number;
+    target_dangerous_pct_reduction?: number;
+  };
+  target_baseline?: CounterfactualSummary;
+  target_scenario?: CounterfactualSummary;
+  affected_segments: GeoJSON.FeatureCollection;
+  isochrone?: {
+    baseline_area_km2: number;
+    scenario_area_km2: number;
+    area_gain_pct: number;
+  } | null;
+  shaded_target_utci_c?: number;
+}
+
+export async function fetchWithTimeout(url: string, opts?: RequestInit & { timeoutMs?: number }): Promise<Response> {
+  const timeoutMs = opts?.timeoutMs ?? 8_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function get<T>(path: string, opts?: { timeoutMs?: number }): Promise<T> {
+  const r = await fetchWithTimeout(`${API_BASE}${path}`, { timeoutMs: opts?.timeoutMs ?? 30_000 });
+  if (r.status === 202) throw new Error(`GET ${path} -> still loading (202)`);
   if (!r.ok) throw new Error(`GET ${path} -> ${r.status}`);
   return r.json();
 }
@@ -356,7 +409,16 @@ export const api = {
   bestDeparture: (body: any) => post<BestDeparture>("/api/best-departure", body),
   isochrone: (body: any) => post<GeoJSON.FeatureCollection>("/api/isochrone", body),
   heatExposure: (hour: number) => get<HeatExposure>(`/api/heat-exposure?hour=${hour}`),
-  whatif: (body: any) => post<any>("/api/whatif", body),
+  whatif: (body: { edge_uids: string[]; added_shade_fraction: number; hour: number }) =>
+    post<{ edges_changed: number; city_utci_reduction_c: number; network_km_upgraded_band: number }>("/api/whatif", body),
+  counterfactual: (body: {
+    edge_uids: string[];
+    added_shade_fraction: number;
+    hour: number;
+    origin?: LatLon;
+    isochrone_minutes?: number;
+    profile?: UserProfile;
+  }) => post<CounterfactualResponse>("/api/counterfactual", body),
   trafficStats: () => get<any>("/api/traffic/stats"),
   trafficRoads: () => get<GeoJSON.FeatureCollection>("/api/traffic/roads"),
   trafficCongestion: () => get<Record<string, number>>("/api/traffic/congestion"),

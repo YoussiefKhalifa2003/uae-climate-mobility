@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useStore } from "../store/useStore";
-import { api, UserProfile, RouteOption, RouteRealtimeMeta } from "../api/client";
+import { UserProfile, RouteOption, RouteRealtimeMeta, RouteRiskOption } from "../api/client";
 import { heatBandColor, cvsBandColor } from "../lib/colors";
-import { BandBars } from "./charts";
-import { partitionRouteOptions, ROUTE_INTENT } from "../lib/routes";
+import { BandBars, CompareBandBars } from "./charts";
+import { partitionRouteOptions, ROUTE_INTENT, findRouteIndex } from "../lib/routes";
 
 const PROFILE_LABELS: Record<UserProfile, string> = {
   default: "Adult",
@@ -47,7 +47,11 @@ function NavigatePanel() {
     selectedRouteIdx,
     travelMode,
     routeUpdatedAt,
+    routeRisk,
+    routeRiskLoading,
   } = store;
+
+  const riskByLabel = new Map(routeRisk?.options.map((o) => [o.label, o]) ?? []);
 
   const [showExtraRoutes, setShowExtraRoutes] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
@@ -136,6 +140,20 @@ function NavigatePanel() {
 
       {route && visible.length > 0 && (
         <Card title="Routes">
+          {routeRisk?.advisory && (
+            <RiskAdvisory
+              advisory={routeRisk.advisory}
+              recommended={routeRisk.recommended_label}
+              selectedLabel={selectedOpt?.label}
+              onSelectRecommended={() => {
+                const idx = findRouteIndex(route.options, routeRisk.recommended_label ?? "");
+                if (idx >= 0) store.selectRoute(idx);
+              }}
+            />
+          )}
+          {routeRiskLoading && !routeRisk && (
+            <p className="mb-2 text-[10px] text-slate-500 animate-pulse">Scoring routes under P95 weather…</p>
+          )}
           {route.realtime && (
             <RealtimeBadge rt={route.realtime} updatedAt={routeUpdatedAt} routing={routing} />
           )}
@@ -146,6 +164,8 @@ function NavigatePanel() {
                 <RouteRow
                   key={`${opt.label}-${i}`}
                   opt={opt}
+                  risk={riskByLabel.get(opt.label)}
+                  recommended={routeRisk?.recommended_label === opt.label}
                   selected={i === selectedRouteIdx}
                   onClick={() => store.selectRoute(i)}
                 />
@@ -182,80 +202,191 @@ function NavigatePanel() {
 
 function SimulatePanel() {
   const store = useStore();
-  const he = store.heatExposure;
-  const [minutes, setMinutes] = useState(10);
-  const [shade, setShade] = useState(0.7);
-  const [whatif, setWhatif] = useState<any>(null);
-
-  const runWhatIf = async () => {
-    const uids =
-      (he?.worst_segments.features
-        .map((f) => (f.properties as any)?.uid)
-        .filter(Boolean) as string[]) ?? [];
-    const res = await api.whatif({ edge_uids: uids, added_shade_fraction: shade, hour: store.hour });
-    setWhatif(res);
-  };
+  const {
+    heatExposure: he,
+    hour,
+    origin,
+    interventionEdgeUids,
+    interventionShade,
+    counterfactual,
+    counterfactualLoading,
+    twinMapView,
+    isochroneMinutes,
+  } = store;
+  const [reachMin, setReachMin] = useState(isochroneMinutes);
 
   return (
     <>
-      <Card title="City exposure">
-        <p className="mb-2 text-[11px] text-slate-400">
-          Counterfactual twin — heat equity &amp; intervention scenarios (Phase 1 engine preview).
+      <Card title="Counterfactual twin">
+        <p className="mb-2 text-[11px] leading-snug text-slate-400">
+          Model shade trees or awnings on hot streets. Compare baseline vs upgraded city exposure and
+          see how far you can comfortably walk.
         </p>
         {he ? (
           <>
             <div className="mb-2 grid grid-cols-3 gap-2">
               <MiniStat label="Avg UTCI" value={`${he.summary.avg_utci_c}°`} />
-              <MiniStat label="Shade" value={`${he.summary.avg_shade_pct}%`} />
+              <MiniStat label="Dangerous" value={`${he.summary.dangerous_network_pct}%`} />
               <MiniStat label="Network" value={`${he.summary.network_km} km`} />
             </div>
-            <BandBars bandPct={he.summary.band_pct} />
-            <p className="mt-2 text-[10px] text-slate-400">{he.summary.equity_note}</p>
+            {!counterfactual ? (
+              <>
+                <BandBars bandPct={he.summary.band_pct} />
+                <p className="mt-2 text-[10px] text-slate-400">{he.summary.equity_note}</p>
+              </>
+            ) : (
+              <>
+                {counterfactual.target_baseline && counterfactual.target_scenario && (
+                  <div className="mb-2 rounded-lg border border-emerald-500/40 bg-emerald-950/40 px-2.5 py-2">
+                    <div className="text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
+                      On selected streets ({counterfactual.delta.edges_targeted})
+                    </div>
+                    <div className="mt-1 font-mono text-lg font-bold text-white">
+                      {counterfactual.target_baseline.avg_utci_c}° → {counterfactual.target_scenario.avg_utci_c}° UTCI
+                    </div>
+                    <p className="mt-0.5 text-[10px] text-emerald-200">
+                      −{(counterfactual.delta.target_avg_utci_reduction_c ?? 0).toFixed(1)}°C avg on{" "}
+                      {(counterfactual.delta.target_km ?? 0).toFixed(2)} km of upgraded streets
+                    </p>
+                  </div>
+                )}
+                <div className="mb-1 text-[9px] uppercase text-slate-500">Heat bands — selected streets</div>
+                <CompareBandBars
+                  baseline={counterfactual.target_baseline?.band_pct ?? counterfactual.baseline.band_pct}
+                  scenario={counterfactual.target_scenario?.band_pct ?? counterfactual.scenario.band_pct}
+                />
+                <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
+                  <div className="rounded-lg bg-panel2/60 px-2 py-1.5">
+                    <div className="text-slate-500">City-wide UTCI</div>
+                    <div className="font-mono text-slate-400">
+                      {counterfactual.baseline.avg_utci_c}° → {counterfactual.scenario.avg_utci_c}°
+                      <span className="ml-1 text-[9px]">(whole network)</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-panel2/60 px-2 py-1.5">
+                    <div className="text-slate-500">Band upgrades</div>
+                    <div className="font-mono text-emerald-300">
+                      {counterfactual.delta.network_km_upgraded_band} km improved
+                    </div>
+                  </div>
+                </div>
+                <p className="mt-2 text-[10px] text-slate-400">
+                  City-wide numbers move slowly when only a few streets change — look at the{" "}
+                  <strong className="text-emerald-300">thick colored lines on the map</strong> and toggle
+                  Baseline / After upgrade below.
+                </p>
+              </>
+            )}
           </>
         ) : (
           <p className="text-xs text-slate-500">Loading city exposure…</p>
         )}
       </Card>
 
-      <Card title="Shade intervention">
-        <p className="mb-2 text-[11px] text-slate-400">
-          Add trees / awnings to hottest street segments and measure city-wide UTCI reduction.
+      <Card title="Intervention">
+        <p className="mb-2 text-[10px] text-slate-500">
+          Click red hotspots on the map to add/remove streets. Gold = selected for upgrade.
         </p>
+        <div className="mb-2 flex flex-wrap gap-1">
+          <button
+            type="button"
+            onClick={() => store.seedInterventionFromWorst(10)}
+            className="rounded-md bg-panel2 px-2 py-1 text-[10px] text-slate-200 hover:bg-edge"
+          >
+            Top 10 hottest
+          </button>
+          <button
+            type="button"
+            onClick={() => store.seedInterventionFromWorst(25)}
+            className="rounded-md bg-panel2 px-2 py-1 text-[10px] text-slate-200 hover:bg-edge"
+          >
+            Top 25
+          </button>
+          <button
+            type="button"
+            onClick={() => store.clearIntervention()}
+            className="rounded-md bg-panel2 px-2 py-1 text-[10px] text-slate-400 hover:bg-edge"
+          >
+            Clear
+          </button>
+        </div>
+        <p className="mb-2 font-mono text-[10px] text-amber-300">{interventionEdgeUids.length} streets selected</p>
+
+        <div className="mb-1 text-[10px] uppercase text-slate-500">Added shade cover</div>
         <div className="flex items-center gap-2">
           <input
             type="range"
             min={0.2}
             max={1}
             step={0.1}
-            value={shade}
-            onChange={(e) => setShade(parseFloat(e.target.value))}
+            value={interventionShade}
+            onChange={(e) => store.setInterventionShade(parseFloat(e.target.value))}
             className="flex-1 accent-accent"
           />
-          <span className="w-12 font-mono text-xs text-slate-300">{(shade * 100).toFixed(0)}%</span>
+          <span className="w-12 font-mono text-xs text-slate-300">{(interventionShade * 100).toFixed(0)}%</span>
         </div>
+
         <button
           type="button"
-          onClick={runWhatIf}
-          disabled={!he}
-          className="mt-2 w-full rounded-lg bg-accent px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40"
+          onClick={() => void store.runCounterfactual()}
+          disabled={!he || counterfactualLoading || interventionEdgeUids.length === 0}
+          className="mt-3 w-full rounded-lg bg-accent px-3 py-2.5 text-xs font-bold text-ink disabled:opacity-40"
         >
-          Run counterfactual
+          {counterfactualLoading ? "Running twin…" : "Apply counterfactual twin"}
         </button>
-        {whatif && (
-          <div className="mt-2 rounded-lg bg-panel2/60 p-2 text-[11px]">
-            <Row label="Streets upgraded" value={`${whatif.edges_changed}`} />
-            <Row label="City UTCI ↓" value={`${whatif.city_utci_reduction_c}°C`} good />
-            <Row label="Network improved" value={`${whatif.network_km_upgraded_band} km`} good />
+
+        {counterfactual && (
+          <div className="mt-2 space-y-2">
+            <div className="rounded-lg bg-panel2/60 p-2 text-[11px]">
+              <Row label="Streets upgraded" value={`${counterfactual.delta.edges_targeted}`} />
+              <Row
+                label="Selected streets UTCI ↓"
+                value={`${(counterfactual.delta.target_avg_utci_reduction_c ?? 0).toFixed(1)}°C`}
+                good
+              />
+              <Row label="City UTCI ↓" value={`${counterfactual.delta.avg_utci_reduction_c}°C`} />
+              <Row label="Band upgrades" value={`${counterfactual.delta.network_km_upgraded_band} km`} good />
+            </div>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => store.setTwinMapView("baseline")}
+                className={`flex-1 rounded-md py-1 text-[10px] font-semibold ${
+                  twinMapView === "baseline" ? "bg-panel2 text-white" : "text-slate-500"
+                }`}
+              >
+                Baseline map
+              </button>
+              <button
+                type="button"
+                onClick={() => store.setTwinMapView("scenario")}
+                className={`flex-1 rounded-md py-1 text-[10px] font-semibold ${
+                  twinMapView === "scenario" ? "bg-emerald-700/60 text-white" : "text-slate-500"
+                }`}
+              >
+                After upgrade
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => store.clearCounterfactual()}
+              className="w-full text-[10px] text-slate-500 hover:text-slate-300"
+            >
+              Reset twin results
+            </button>
           </div>
         )}
       </Card>
 
       <Card title="Reachability">
+        <p className="mb-2 text-[10px] text-slate-500">
+          Comfort-aware walk radius from origin — included in twin when origin is set.
+        </p>
         <PointButton
           label="Origin"
           active={store.pickMode === "origin"}
           set={() => store.setPickMode("origin")}
-          value={store.origin}
+          value={origin}
           dotClass="bg-accent"
         />
         <div className="mt-2 flex items-center gap-2">
@@ -264,23 +395,41 @@ function SimulatePanel() {
             min={5}
             max={30}
             step={5}
-            value={minutes}
-            onChange={(e) => setMinutes(parseInt(e.target.value, 10))}
+            value={reachMin}
+            onChange={(e) => setReachMin(parseInt(e.target.value, 10))}
             className="flex-1 accent-accent"
           />
-          <span className="font-mono text-xs text-slate-300">{minutes} min</span>
+          <span className="font-mono text-xs text-slate-300">{reachMin} min</span>
         </div>
         <button
           type="button"
-          onClick={() => store.computeIsochrone(minutes)}
-          disabled={!store.origin}
+          onClick={() => store.computeIsochrone(reachMin)}
+          disabled={!origin}
           className="mt-2 w-full rounded-lg bg-panel2 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-40"
         >
-          Comfort isochrone
+          Refresh isochrone
         </button>
+        {counterfactual?.isochrone && (
+          <div className="mt-2 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-2.5 py-2 text-[10px]">
+            <div className="font-semibold text-emerald-300">Walkable area gain</div>
+            <p className="mt-1 text-slate-200">
+              {counterfactual.isochrone.baseline_area_km2} km² → {counterfactual.isochrone.scenario_area_km2} km²
+              <span className="ml-1 font-mono text-emerald-300">
+                (+{counterfactual.isochrone.area_gain_pct}%)
+              </span>
+            </p>
+            <p className="mt-0.5 text-slate-500">At {fmtSimHour(hour)} with intervention applied city-wide.</p>
+          </div>
+        )}
       </Card>
     </>
   );
+}
+
+function fmtSimHour(h: number): string {
+  const hh = Math.floor(h) % 24;
+  const mm = Math.round((h % 1) * 60);
+  return `${hh.toString().padStart(2, "0")}:${mm.toString().padStart(2, "0")}`;
 }
 
 function PointButton({
@@ -315,7 +464,48 @@ function PointButton({
   );
 }
 
-function RouteRow({ opt, selected, onClick }: { opt: RouteOption; selected: boolean; onClick: () => void }) {
+function RiskAdvisory({
+  advisory,
+  recommended,
+  selectedLabel,
+  onSelectRecommended,
+}: {
+  advisory: string;
+  recommended?: string | null;
+  selectedLabel?: string;
+  onSelectRecommended: () => void;
+}) {
+  const showSwitch = recommended && selectedLabel && recommended !== selectedLabel;
+  return (
+    <div className="mb-2 rounded-lg border border-violet-500/40 bg-violet-950/40 px-2.5 py-2">
+      <div className="text-[9px] font-semibold uppercase tracking-wide text-violet-300">Uncertainty advisory</div>
+      <p className="mt-1 text-[10px] leading-snug text-slate-200">{advisory}</p>
+      {showSwitch && (
+        <button
+          type="button"
+          onClick={onSelectRecommended}
+          className="mt-2 rounded-md bg-violet-600 px-2 py-1 text-[10px] font-semibold text-white hover:bg-violet-500"
+        >
+          Switch to {recommended}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RouteRow({
+  opt,
+  risk,
+  recommended,
+  selected,
+  onClick,
+}: {
+  opt: RouteOption;
+  risk?: RouteRiskOption;
+  recommended?: boolean;
+  selected: boolean;
+  onClick: () => void;
+}) {
   const m = opt.metrics;
   const c = `rgb(${opt.color[0]},${opt.color[1]},${opt.color[2]})`;
   const intent = ROUTE_INTENT[opt.label] ?? opt.description;
@@ -336,6 +526,17 @@ function RouteRow({ opt, selected, onClick }: { opt: RouteOption; selected: bool
         <span className="font-mono text-[11px] text-slate-300">{m.duration_min} min</span>
       </div>
       <p className="mt-0.5 truncate text-[10px] text-slate-500">{intent}</p>
+      {risk && (
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
+          <span className={risk.confidence_pct >= 70 ? "text-emerald-300" : risk.confidence_pct >= 45 ? "text-amber-300" : "text-red-300"}>
+            {risk.confidence_pct.toFixed(0)}% safe (P95)
+          </span>
+          <span className="font-mono text-slate-400">peak {risk.peak_utci_p95.toFixed(0)}°C</span>
+          {recommended && (
+            <span className="rounded bg-violet-600/60 px-1 py-px text-[9px] font-semibold text-violet-100">Recommended</span>
+          )}
+        </div>
+      )}
       {m.cvs_score != null && (
         <div className="mt-1 text-[10px]" style={{ color: cvsBandColor[m.cvs_band ?? "Fair"] }}>
           CVS {m.cvs_score} · {m.cvs_band}

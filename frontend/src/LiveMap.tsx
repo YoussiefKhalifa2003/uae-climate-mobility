@@ -9,7 +9,7 @@ import { useStore } from "./store/useStore";
 import { utciColor, pm25HeatColor, AIR_HEATMAP_COLORS, congestionColor, refugeColor, buildingColor } from "./lib/colors";
 import type { RouteOption } from "./api/client";
 import type { Layer } from "@deck.gl/core";
-import { activeTimeline, getActiveExposureContext, horizonTimeline, pmStressNorm, sampleTimeline, buildExposureRibbon, findShadeCrossings } from "./lib/tripExposure";
+import { activeTimeline, getActiveExposureContext, horizonTimeline, pmStressNorm, sampleTimeline, buildExposureRibbon, findShadeCrossings, timelineHasP95Bands } from "./lib/tripExposure";
 
 const MAP_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
@@ -187,6 +187,10 @@ export default function LiveMap() {
     tripPlaying,
     exposureForecast,
     forecastDelayMin,
+    mode,
+    interventionEdgeUids,
+    counterfactual,
+    twinMapView,
   } = store;
 
   const selRoute = route?.options[selectedRouteIdx];
@@ -216,8 +220,9 @@ export default function LiveMap() {
 
   const exposureRibbon = useMemo(() => {
     if (!exposure4DEnabled || !activeTl.length) return [];
-    return buildExposureRibbon(activeTl);
-  }, [exposure4DEnabled, activeTl]);
+    const worstCase = !!exposureForecast && timelineHasP95Bands(activeTl);
+    return buildExposureRibbon(activeTl, { worstCase });
+  }, [exposure4DEnabled, activeTl, exposureForecast]);
 
   const shadeCrossings = useMemo(() => {
     if (!exposure4DEnabled || !activeTl.length) return [];
@@ -244,6 +249,34 @@ export default function LiveMap() {
       }));
     }
   }, [sector?.place, focusMode, demoPlaying, tripPlaying]);
+
+  // Zoom to upgraded streets when counterfactual twin is applied.
+  useEffect(() => {
+    if (mode !== "simulate" || !counterfactual?.affected_segments?.features?.length) return;
+    let minLon = Infinity;
+    let minLat = Infinity;
+    let maxLon = -Infinity;
+    let maxLat = -Infinity;
+    for (const feat of counterfactual.affected_segments.features) {
+      const geom = feat.geometry;
+      if (geom?.type !== "LineString" || !geom.coordinates?.length) continue;
+      for (const [lon, lat] of geom.coordinates as [number, number][]) {
+        minLon = Math.min(minLon, lon);
+        maxLon = Math.max(maxLon, lon);
+        minLat = Math.min(minLat, lat);
+        maxLat = Math.max(maxLat, lat);
+      }
+    }
+    if (!Number.isFinite(minLon)) return;
+    setViewState((v) => ({
+      ...v,
+      longitude: (minLon + maxLon) / 2,
+      latitude: (minLat + maxLat) / 2,
+      zoom: 16,
+      pitch: 55,
+      transitionDuration: 800,
+    }));
+  }, [mode, counterfactual?.affected_segments]);
 
   // Camera follows the exposure bubble during focus / demo / playback.
   const cameraFollow = focusMode || demoPlaying || tripPlaying;
@@ -305,6 +338,16 @@ export default function LiveMap() {
   const onClick = (info: PickingInfo) => {
     if (store.pickMode && info.coordinate) {
       store.setPoint({ lon: info.coordinate[0], lat: info.coordinate[1] });
+      return;
+    }
+    if (mode === "simulate" && info.object?.properties?.uid) {
+      const uid = String(info.object.properties.uid);
+      const wasSelected = store.interventionEdgeUids.includes(uid);
+      store.toggleInterventionEdge(uid);
+      const count = useStore.getState().interventionEdgeUids.length;
+      store.setMapMoment(
+        wasSelected ? `Removed street — ${count} in intervention set` : `Added street — ${count} in intervention set`,
+      );
     }
   };
 
@@ -390,17 +433,62 @@ export default function LiveMap() {
     );
   }
 
-  // 4. Worst heat segments (simulate mode).
+  // 4. Worst heat segments + intervention selection (simulate mode).
   if (layers.worstSegments && heatExposure?.worst_segments) {
+    const selected = new Set(interventionEdgeUids);
+    const twinActive = !!counterfactual?.affected_segments?.features?.length;
     deckLayers.push(
       new GeoJsonLayer({
         id: "worst",
         data: heatExposure.worst_segments as any,
-        getLineColor: [248, 113, 113, 230],
-        getLineWidth: 7,
-        lineWidthMinPixels: 3,
-        pickable: true,
+        getLineColor: (f: any) => {
+          const uid = f.properties?.uid;
+          if (twinActive && selected.has(uid)) return [0, 0, 0, 0];
+          if (selected.has(uid)) return [251, 191, 36, 255];
+          return twinActive ? [100, 116, 139, 80] : [248, 113, 113, 200];
+        },
+        getLineWidth: (f: any) => {
+          const uid = f.properties?.uid;
+          if (twinActive && selected.has(uid)) return 0;
+          return selected.has(uid) ? 8 : 4;
+        },
+        lineWidthMinPixels: 2,
+        pickable: mode === "simulate" && !twinActive,
       })
+    );
+  }
+
+  // 4b. Counterfactual twin — upgraded segments (thick before/after overlay).
+  if (mode === "simulate" && counterfactual?.affected_segments?.features?.length) {
+    const twinData = counterfactual.affected_segments as any;
+    const isBaseline = twinMapView === "baseline";
+    deckLayers.push(
+      new GeoJsonLayer({
+        id: "twin-intervention-glow",
+        data: twinData,
+        getLineColor: isBaseline ? [248, 113, 113, 120] : [52, 211, 153, 120],
+        getLineWidth: 22,
+        lineWidthMinPixels: 10,
+        capRounded: true,
+        jointRounded: true,
+        pickable: false,
+      }),
+      new GeoJsonLayer({
+        id: "twin-intervention",
+        data: twinData,
+        getLineColor: (f: any) => {
+          if (isBaseline) return [248, 113, 113, 255];
+          const delta = f.properties?.utci_delta_c ?? 0;
+          if (delta >= 4) return [52, 211, 153, 255];
+          if (delta >= 2) return [56, 189, 248, 255];
+          return [134, 239, 172, 255];
+        },
+        getLineWidth: 12,
+        lineWidthMinPixels: 6,
+        capRounded: true,
+        jointRounded: true,
+        pickable: true,
+      }),
     );
   }
 
