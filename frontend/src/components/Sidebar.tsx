@@ -5,6 +5,7 @@ import { heatBandColor, cvsBandColor } from "../lib/colors";
 import { BandBars } from "./charts";
 import { partitionRouteOptions, ROUTE_INTENT, findRouteIndex } from "../lib/routes";
 import SimulatePanel from "./SimulatePanel";
+import LiveConditionsPanel from "./LiveConditionsPanel";
 
 const PROFILE_LABELS: Record<UserProfile, string> = {
   default: "Adult",
@@ -22,6 +23,7 @@ export default function Sidebar() {
   const mode = useStore((s) => s.mode);
   return (
     <div className="absolute left-3 top-20 z-10 flex max-h-[calc(100vh-9rem)] w-[300px] flex-col gap-3 overflow-y-auto pb-2">
+      {mode === "simulate" && <LiveConditionsPanel />}
       {mode === "simulate" ? <SimulatePanel /> : <NavigatePanel />}
     </div>
   );

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import LiveMap from "./LiveMap";
-import { useStore, getCurrentUAEHour, getMaxSelectableUAEHour, isRouteRefreshBlocked, snapUAEHour } from "./store/useStore";
+import { useStore, getCurrentUAEHour, getMaxSelectableUAEHour, isHourNearNow, isRouteRefreshBlocked, snapUAEHour } from "./store/useStore";
 import { getActiveExposureContext } from "./lib/tripExposure";
 import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
@@ -52,9 +52,9 @@ export default function App() {
   // Boot
   useEffect(() => { init(); }, [init]);
 
-  // Live weather/AQI: refresh every 45 s (bypass backend cache, refresh overlays).
+  // Live weather/AQI: refresh every 20 s while simulating.
   useEffect(() => {
-    const ms = mode === "simulate" ? 45_000 : 60_000;
+    const ms = mode === "simulate" ? 20_000 : 45_000;
     const id = setInterval(() => refreshEnvironment(true), ms);
     return () => clearInterval(id);
   }, [refreshEnvironment, mode]);
@@ -66,16 +66,21 @@ export default function App() {
     return () => clearInterval(id);
   }, [refreshProvenance]);
 
-  // Real-time sync: every 60 s drift back to current UAE time.
+  // Real-time sync: every 60 s drift back to current UAE time — only when idle at "now".
   useEffect(() => {
-    const id = setInterval(() => syncToNow(), 60_000);
+    const id = setInterval(() => {
+      const s = useStore.getState();
+      if (s.playing) return;
+      if (!isHourNearNow(s.hour)) return;
+      syncToNow();
+    }, 60_000);
     return () => clearInterval(id);
   }, [syncToNow]);
 
-  // Air-quality refresh: every 5 s (paused during play — play loop handles it).
+  // Air-quality refresh: every 3 s (paused during play — play loop handles it).
   useEffect(() => {
     if (playing) return;
-    const id = setInterval(() => refreshAir(), 5_000);
+    const id = setInterval(() => refreshAir(), 3_000);
     return () => clearInterval(id);
   }, [refreshAir, playing]);
 
@@ -159,14 +164,18 @@ export default function App() {
       const hourStep = prev === null || Math.abs(snapped - prev) >= 0.01;
 
       if (hourStep) {
-        scheduleLayerRefresh(snapped, { forceEnv: snapped >= maxH - 0.01, immediate: true });
+        scheduleLayerRefresh(snapped, {
+          forceEnv: snapped >= maxH - 0.01,
+          immediate: true,
+          includeHeat: false,
+        });
       } else {
         void refreshLivePulse();
       }
     };
 
     tick();
-    const id = setInterval(tick, 2_000);
+    const id = setInterval(tick, 1_000);
     return () => clearInterval(id);
   }, [playing, setHourLight, scheduleLayerRefresh, refreshLivePulse]);
 

@@ -110,7 +110,11 @@ export default function TimeBar() {
             if (playing) useStore.setState({ playing: false });
           }}
           onPointerUp={(e) => onSliderCommit(parseFloat(e.currentTarget.value))}
-          onPointerCancel={() => {
+          onPointerCancel={(e) => {
+            if (dragHour != null) {
+              onSliderCommit(parseFloat(e.currentTarget.value));
+              return;
+            }
             dragging.current = false;
             setDragHour(null);
           }}

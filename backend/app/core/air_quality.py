@@ -104,18 +104,27 @@ class AirField:
 _FIELD: AirField | None = None
 
 
-def compute_field(env: dict | None = None) -> AirField:
+def compute_field(
+    env: dict | None = None,
+    hour: float | None = None,
+    emission_scale: float = 1.0,
+) -> AirField:
     """Recompute the concentration field from the live emission grid."""
     from app.data.adapters import get_environment
     from app.data import provenance
 
-    env = env or get_environment()
+    if env is None:
+        env = get_environment(hour if hour is not None else 14.0)
     sim = get_sim()
     xp = compute.xp
 
     emission = xp.asarray(sim.emission_grid_cpu())
     if float(emission.max()) <= 0:
         emission = emission + 1e-3
+
+    scale = float(max(0.05, min(1.0, emission_scale)))
+    if scale < 0.999:
+        emission = emission * scale
 
     try:
         from app.core.v2x_optimizer import get_v2x_scenario
@@ -137,13 +146,17 @@ def compute_field(env: dict | None = None) -> AirField:
     pm25 = compute.to_cpu(conc_scaled) + baseline
     aqi = _pm25_to_aqi_vec(pm25).astype(np.int32)
 
-    aq_live = "live" in str(env.get("source", ""))
+    aq_live = bool(env.get("aq_live")) or "live" in str(env.get("source", ""))
+    h_label = f"{hour:.1f}" if hour is not None else "now"
     provenance.set_source(
         "air_map",
         "Air Quality (map layer)",
-        "hybrid:live-baseline+traffic-plume" if aq_live else "simulated:traffic-plume",
+        "hybrid:open-meteo-hourly+traffic-plume" if aq_live else "simulated:traffic-plume",
         aq_live,
-        f"Baseline PM2.5 {baseline:.1f} µg/m³ from {env.get('source', '?')} + Gaussian dispersion of traffic emissions",
+        (
+            f"Hour {h_label} UAE · PM2.5 baseline {baseline:.1f} µg/m³ (Open-Meteo hourly when live) "
+            f"+ traffic plume × {scale:.0%} · wind {env['wind_speed_ms']:.1f} m/s"
+        ),
     )
 
     global _FIELD

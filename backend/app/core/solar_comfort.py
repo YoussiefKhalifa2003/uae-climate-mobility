@@ -266,6 +266,12 @@ def invalidate_fields() -> None:
     _FIELDS.clear()
 
 
+def invalidate_hour(hour: float) -> None:
+    """Drop one cached UTCI slot so the next request uses fresh env for that hour."""
+    snapped = round(float(hour) * 2) / 2.0
+    _FIELDS.pop(snapped, None)
+
+
 def _row_col(transform, x: float, y: float) -> tuple[int, int]:
     # transform: Affine(res,0,minx,0,-res,maxy) -> col=(x-minx)/res, row=(maxy-y)/res
     col = int((x - transform.c) / transform.a)

@@ -16,7 +16,7 @@ const LAYER_META: {
   { key: "humidity", label: "Humidity fog", hint: "Trapped coastal moisture (purple = worst)", simulateOnly: true },
   { key: "comfort", label: "Heat map", hint: "UTCI comfort field", provKey: "utci" },
   { key: "air", label: "Air pollution", hint: "Traffic + PM2.5 plume", provKey: "air_map" },
-  { key: "traffic", label: "Traffic", hint: "Agent sim by default; add TOMTOM_API_KEY in .env for live flow", provKey: "traffic" },
+  { key: "traffic", label: "Traffic", hint: "", provKey: "traffic" },
   { key: "refuges", label: "Cool spots", hint: "Malls, metro, parks", provKey: "refuges" },
   { key: "routes", label: "Routes", hint: "Navigate mode only" },
   { key: "wind", label: "Wind flow", hint: "Flowing breeze streaks (live wind + canyon model)", simulateOnly: true },
@@ -66,6 +66,12 @@ export default function Legend() {
       <div className="grid grid-cols-1 gap-1">
         {visible.map(({ key, label, hint, provKey }) => {
           const live = liveFor(provKey);
+          const rowHint =
+            key === "traffic"
+              ? trafficStatus?.live || trafficStatus?.tomtom_regional_congestion != null
+                ? "TomTom Flow API — live regional congestion"
+                : "Agent sim by default; add TOMTOM_API_KEY in .env for live flow"
+              : hint;
           return (
             <label
               key={key}
@@ -87,7 +93,7 @@ export default function Legend() {
                     <span className="rounded bg-warn/15 px-1 text-[8px] text-warn">SIM</span>
                   )}
                 </span>
-                <span className="block text-[9px] text-slate-500">{hint}</span>
+                <span className="block text-[9px] text-slate-500">{rowHint}</span>
               </span>
             </label>
           );
@@ -107,7 +113,7 @@ export default function Legend() {
             ) : (
               <>
                 <span className="font-semibold text-warn">Simulated</span>
-                {" — agent model (add TOMTOM_API_KEY for live)"}
+                {" — agent model on OSM roads"}
               </>
             )}
           </p>

@@ -87,11 +87,22 @@ function pushRouteColorLayers(
   }
 }
 
-/** Lighting tied to the real solar azimuth/elevation for accurate skyline shading. */
+/** Lighting tied to the real solar azimuth/elevation for accurate skyline shading.
+ *  Brightness scales smoothly with sun elevation so buildings dim at dusk/night
+ *  and brighten through midday. */
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
 function makeLighting(azimuth: number, elevation: number): LightingEffect {
-  const ambient = new AmbientLight({ color: [255, 255, 255], intensity: 1.4 });
-  // Convert sun az/el to a downward-pointing direction vector.
-  const el = Math.max(5, elevation) * (Math.PI / 180);
+  // Soft dawn/dusk transition — avoid pitch-black nights and blown-out midday.
+  const day = smoothstep(-8, 42, elevation);
+  const ambient = new AmbientLight({
+    color: [255, 255, 255],
+    intensity: 0.78 + 0.42 * day,
+  });
+  const el = Math.max(4, elevation) * (Math.PI / 180);
   const az = azimuth * (Math.PI / 180);
   const dir: [number, number, number] = [
     -Math.sin(az) * Math.cos(el),
@@ -99,13 +110,13 @@ function makeLighting(azimuth: number, elevation: number): LightingEffect {
     -Math.sin(el),
   ];
   const sun = new DirectionalLight({
-    color: [255, 245, 225],
-    intensity: elevation > 0 ? 2.0 : 0.3,
+    color: [255, 248, 235],
+    intensity: 0.38 + 1.05 * day,
     direction: dir,
   });
   const fill = new DirectionalLight({
-    color: [180, 200, 230],
-    intensity: 0.7,
+    color: [190, 205, 225],
+    intensity: 0.48 + 0.28 * day,
     direction: [0.3, 0.5, -1],
   });
   return new LightingEffect({ ambient, sun, fill });
@@ -254,7 +265,12 @@ export default function LiveMap() {
     airlockGates,
     selectionFocusEpoch,
     layerSyncEpoch,
+    layerSyncHour,
+    hour,
+    solarPreview,
   } = store;
+
+  const mapHour = layerSyncHour ?? hour;
 
   const selRoute = route?.options[selectedRouteIdx];
   const { timeline: activeTl } = useMemo(
@@ -456,12 +472,12 @@ export default function LiveMap() {
       })),
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roadSegments, congestionSeq]);
+  }, [roadSegments, congestionSeq, mapHour]);
 
-  // Comfort bitmap — recompute only when values change.
+  // Comfort bitmap — recompute when hour or values change.
   const comfortImage = useMemo(
     () => (comfort ? buildComfortImage(comfort.values, comfort.shape as [number, number]) : null),
-    [comfort, layerSyncEpoch],
+    [comfort, layerSyncEpoch, mapHour],
   );
 
   const airImage = useMemo(
@@ -474,7 +490,7 @@ export default function LiveMap() {
             airRaster.pm25_max
           )
         : null,
-    [airRaster, layerSyncEpoch],
+    [airRaster, layerSyncEpoch, mapHour],
   );
 
   const humidityImage = useMemo(
@@ -487,14 +503,15 @@ export default function LiveMap() {
             humidityRaster.rh_max,
           )
         : null,
-    [humidityRaster, layerSyncEpoch],
+    [humidityRaster, layerSyncEpoch, mapHour],
   );
 
   // Lighting follows the real sun position for the current hour.
-  const lightingEffect = useMemo(
-    () => makeLighting(comfort?.azimuth ?? 135, comfort?.elevation ?? 45),
-    [comfort?.azimuth, comfort?.elevation]
-  );
+  const lightingEffect = useMemo(() => {
+    const az = solarPreview?.azimuth ?? comfort?.azimuth ?? 135;
+    const el = solarPreview?.elevation ?? comfort?.elevation ?? 45;
+    return makeLighting(az, el);
+  }, [solarPreview?.azimuth, solarPreview?.elevation, comfort?.azimuth, comfort?.elevation]);
 
   const onClick = (info: PickingInfo) => {
     if (store.pickMode && info.coordinate) {
@@ -519,12 +536,14 @@ export default function LiveMap() {
   // 1. UTCI comfort raster (behind everything).
   if (layers.comfort && comfortImage && comfort) {
     const b = comfort.bounds_wgs84;
+    const heatOpacity =
+      mode === "simulate" && layers.humidity ? 0.72 : mode === "simulate" ? 0.78 : 0.5;
     deckLayers.push(
       new BitmapLayer({
         id: "comfort",
         image: comfortImage,
         bounds: [b.west, b.south, b.east, b.north] as [number, number, number, number],
-        opacity: layers.humidity && mode === "simulate" ? 0.32 : 0.5,
+        opacity: layers.humidity && mode === "simulate" ? heatOpacity * 0.45 : heatOpacity,
       })
     );
   }
@@ -532,12 +551,14 @@ export default function LiveMap() {
   // 2a. Air quality — warm full-area dispersion field (yellow / orange / red).
   if (layers.air && airImage && airRaster) {
     const b = airRaster.bounds_wgs84;
+    const airOpacity =
+      mode === "simulate" && layers.comfort ? 0.45 : mode === "simulate" ? 0.65 : 0.92;
     deckLayers.push(
       new BitmapLayer({
         id: "air-field",
         image: airImage,
         bounds: [b.west, b.south, b.east, b.north] as [number, number, number, number],
-        opacity: 0.92,
+        opacity: airOpacity,
       })
     );
   }
@@ -899,6 +920,10 @@ export default function LiveMap() {
         getLineWidth: (f: any) => {
           const c: number = f.properties?.congestion ?? 0;
           return c > 0.65 ? 9 : c > 0.35 ? 6 : 4;
+        },
+        updateTriggers: {
+          getLineColor: [congestionSeq, mapHour],
+          getLineWidth: [congestionSeq, mapHour],
         },
         lineWidthUnits: "meters",
         lineWidthMinPixels: 1,

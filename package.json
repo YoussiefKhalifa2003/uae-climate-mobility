@@ -1,0 +1,10 @@
+{
+  "name": "uae-climate-mobility",
+  "private": true,
+  "description": "UAE Climate Mobility — run backend + frontend together",
+  "scripts": {
+    "dev": "node scripts/run-dev.mjs",
+    "dev:backend": "node scripts/run-backend.mjs",
+    "dev:frontend": "npm run dev --prefix frontend"
+  }
+}

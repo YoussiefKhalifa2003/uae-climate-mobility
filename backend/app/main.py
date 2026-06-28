@@ -19,7 +19,7 @@ from app.config import settings
 from app.core import air_quality, analytics, compute, geo_engine, router as router_engine, solar_comfort
 from app.core.traffic_sim import get_sim
 from app.data import provenance as provenance_mod
-from app.data.traffic_adapter import apply_tomtom_to_congestion, get_live_traffic_hint, traffic_provenance
+from app.data.traffic_adapter import congestion_for_hour, current_uae_hour, get_live_traffic_hint, traffic_provenance, traffic_provenance_for_hour
 from app.models.schemas import (
     BestDepartureResponse,
     EnvSnapshot,
@@ -72,6 +72,14 @@ def _warm() -> None:
         geo_engine.get_geo()
         logger.info("Geo loaded. Building comfort field …")
 
+        # Cache road GeoJSON during warm-up so the first frontend request
+        # doesn't block the event loop for tens of seconds.
+        try:
+            geo_engine.drive_roads_geojson()
+            logger.info("Road network GeoJSON cached.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Road GeoJSON cache skipped: %s", exc)
+
         # Current UAE hour for the initial field
         utc = datetime.datetime.utcnow()
         uae_hour = (utc.hour + 4) % 24 + utc.minute / 60
@@ -89,12 +97,15 @@ def _warm() -> None:
 
         logger.info("Warm-up complete — platform is ready.")
 
-        # Precompute the full day of comfort fields in the background so the
-        # time-slider / Play feature is instant (no per-hour CPU stall).
-        try:
-            solar_comfort.precompute_day()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Day precompute skipped: %s", exc)
+        # Precompute comfort fields in a separate thread so heavy CPU work
+        # never blocks the warm-up thread or stalls live API requests.
+        def _precompute() -> None:
+            try:
+                solar_comfort.precompute_day()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Day precompute skipped: %s", exc)
+
+        threading.Thread(target=_precompute, daemon=True, name="comfort-precompute").start()
     except Exception as exc:  # noqa: BLE001
         _loading_error = str(exc)
         _ready = True  # allow frontend to proceed (will show degraded state)
@@ -325,6 +336,12 @@ def v2x_scenario_get(response: Response):
 def comfort(response: Response, hour: float = Query(14.0, ge=0, le=24)):
     if not _require_ready(response):
         return {"ready": False}
+    from app.data.adapters import get_environment
+    from app.core import solar_comfort
+
+    snapped = round(hour * 2) / 2.0
+    env = get_environment(hour)
+    solar_comfort.compute_hour(snapped, env=env)
     return solar_comfort.comfort_raster_payload(hour)
 
 
@@ -335,11 +352,18 @@ def solar(hour: float = Query(14.0, ge=0, le=24)):
 
 
 @app.get("/api/air")
-def air(response: Response):
+def air(response: Response, hour: float | None = Query(None, ge=0, le=24)):
     if not _require_ready(response):
         return {"shape": [0, 0], "pm25_min": 38.0, "pm25_max": 38.0, "baseline_pm25": 38.0, "values": [], "bounds_wgs84": {"west": 0, "south": 0, "east": 0, "north": 0}}
-    air_quality.compute_field()
-    return air_quality.air_raster_payload()
+    from app.data.adapters import get_environment
+    from app.data.traffic_adapter import diurnal_emission_scale
+
+    h = hour if hour is not None else current_uae_hour()
+    env = get_environment(h)
+    air_quality.compute_field(env=env, hour=h, emission_scale=diurnal_emission_scale(h))
+    payload = air_quality.air_raster_payload()
+    payload["hour"] = h
+    return payload
 
 
 # --------------------------------------------------------------- routing
@@ -561,8 +585,8 @@ def traffic_status(response: Response):
     rec = next((r for r in provenance.get_all() if r["layer"] == "traffic"), None)
     return {
         "ready": True,
-        "live": bool(hint and rec and rec.get("live")),
-        "source": rec["source"] if rec else "unknown",
+        "live": bool(hint),
+        "source": rec["source"] if rec else ("live:tomtom" if hint else "unknown"),
         "detail": rec["detail"] if rec else "",
         "tomtom_regional_congestion": hint.get("__tomtom_avg__") if hint else None,
         "sim_congested_pct": float(stats.get("congested_pct", 0)),
@@ -575,16 +599,20 @@ def traffic_roads(response: Response):
     """Drive-network road geometries (static, cached).  Fetch once at startup."""
     if not _require_ready(response):
         return {"type": "FeatureCollection", "features": []}
-    return geo_engine.drive_roads_geojson()
+    try:
+        return geo_engine.drive_roads_geojson()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("traffic/roads failed")
+        response.status_code = 500
+        return {"type": "FeatureCollection", "features": [], "error": str(exc)}
 
 
 @app.get("/api/traffic/congestion")
-def traffic_congestion(response: Response):
-    """Per-edge congestion 0–1, polled every 2 s by the frontend."""
+def traffic_congestion(response: Response, hour: float | None = Query(None, ge=0, le=24)):
+    """Per-edge congestion 0–1 for the selected UAE hour."""
     if not _require_ready(response):
         return {}
-    sim = get_sim()
-    stats = sim.stats()
-    traffic_provenance(float(stats.get("congested_pct", 0)))
-    base = sim.segment_congestion()
-    return apply_tomtom_to_congestion(base)
+    h = hour if hour is not None else current_uae_hour()
+    stats = get_sim().stats()
+    traffic_provenance_for_hour(h, float(stats.get("congested_pct", 0)))
+    return congestion_for_hour(h)

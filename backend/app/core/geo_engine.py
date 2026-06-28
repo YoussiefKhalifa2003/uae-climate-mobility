@@ -506,6 +506,10 @@ def drive_roads_geojson() -> dict:
         return drive_roads_geojson._cache  # type: ignore[attr-defined]
 
     gd = get_geo()
+    if not gd.graphs:
+        empty = {"type": "FeatureCollection", "features": []}
+        drive_roads_geojson._cache = empty  # type: ignore[attr-defined]
+        return empty
     graph = gd.graphs.get("drive") or next(iter(gd.graphs.values()))
     try:
         import osmnx as ox

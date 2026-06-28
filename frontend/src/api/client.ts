@@ -244,6 +244,7 @@ export interface AirRaster {
   hotspots?: [number, number, number][];
   stations?: AirStation[];
   source?: string;
+  hour?: number;
 }
 
 export interface ProvenanceLayer {
@@ -449,7 +450,7 @@ export const api = {
   provenance: () => get<ProvenanceSnapshot>("/api/provenance"),
   comfort: (hour: number) => get<ComfortRaster>(`/api/comfort?hour=${hour}`),
   solar: (hour: number) => get<{ azimuth_deg: number; elevation_deg: number }>(`/api/solar?hour=${hour}`),
-  air: () => get<AirRaster>("/api/air"),
+  air: (hour: number) => get<AirRaster>(`/api/air?hour=${hour}`),
   route: (body: RouteRequestBody, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
     post<RouteResponse>("/api/route", body, opts),
   exposureTimeline: (body: RouteRequestBody & { label: string }, opts?: { signal?: AbortSignal }) =>
@@ -502,5 +503,5 @@ export const api = {
       updated_age_s?: number | null;
     }>("/api/traffic/status"),
   trafficRoads: () => get<GeoJSON.FeatureCollection>("/api/traffic/roads"),
-  trafficCongestion: () => get<Record<string, number>>("/api/traffic/congestion"),
+  trafficCongestion: (hour: number) => get<Record<string, number>>(`/api/traffic/congestion?hour=${hour}`),
 };
