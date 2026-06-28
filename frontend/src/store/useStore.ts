@@ -225,7 +225,8 @@ interface State {
   setV2xScenario: (active: boolean, penetration: number) => Promise<void>;
   refreshHumidityWind: (hour?: number) => Promise<void>;
   refreshLivePulse: () => Promise<void>;
-  refreshAllLayers: (hour?: number, opts?: { forceEnv?: boolean }) => Promise<void>;
+  refreshOverlayLayers: (hour?: number, opts?: { forceEnv?: boolean }) => Promise<void>;
+  refreshAllLayers: (hour?: number, opts?: { forceEnv?: boolean; includeHeat?: boolean }) => Promise<void>;
   init: () => Promise<void>;
   refreshHour: (h: number) => Promise<void>;
   refreshEnvironment: (force?: boolean) => Promise<void>;
@@ -254,21 +255,21 @@ let _routeReqSeq = 0;
 let _routeAbort: AbortController | null = null;
 let _lastTrafficProvRefresh = 0;
 let _layerRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-/** Bumped on each layer sync — stale in-flight responses are discarded. */
-let _layerSyncGen = 0;
-/** Live pulse uses its own generation so it never cancels a full layer sync. */
+/** Live pulse uses its own generation so it never cancels overlay sync. */
 let _livePulseGen = 0;
-let _layerSyncInflight: Promise<void> | null = null;
-let _layerSyncPending: { h: number; opts?: { forceEnv?: boolean; includeHeat?: boolean } } | null = null;
+/** Fast overlay path — separate queue so play/slider never waits on wind/airlocks/heat. */
+let _overlayGen = 0;
+let _overlayInflight: Promise<void> | null = null;
+let _overlayPending: { h: number; forceEnv?: boolean } | null = null;
 
-function markLayerSynced(
+function bumpOverlaySync(
   set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void,
-  hour?: number,
+  hour: number,
 ) {
   set((s) => ({
     layerSyncEpoch: s.layerSyncEpoch + 1,
     layerSyncAt: Date.now(),
-    layerSyncHour: hour ?? s.hour,
+    layerSyncHour: hour,
   }));
 }
 
@@ -431,13 +432,15 @@ export const useStore = create<State>((set, get) => ({
       includeHeat: opts?.includeHeat ?? !!opts?.immediate,
     };
     if (opts?.immediate) {
-      void get().refreshAllLayers(snapped, syncOpts);
+      void get().refreshOverlayLayers(snapped, { forceEnv: syncOpts.forceEnv });
+      if (syncOpts.includeHeat) void get().computeHeatExposure();
       return;
     }
     _layerRefreshTimer = setTimeout(() => {
       _layerRefreshTimer = null;
-      void get().refreshAllLayers(snapped, syncOpts);
-    }, 80);
+      void get().refreshOverlayLayers(snapped, { forceEnv: syncOpts.forceEnv });
+      if (syncOpts.includeHeat) void get().computeHeatExposure();
+    }, 40);
   },
   togglePlay: () => {
     const next = !get().playing;
@@ -937,21 +940,33 @@ export const useStore = create<State>((set, get) => ({
     const gen = ++_livePulseGen;
     const h = get().hour;
     try {
-      const [envR, airR, congR] = await Promise.allSettled([
+      const wantHumid = get().layers.humidity;
+      const settled = await Promise.allSettled([
         api.environment(h, true),
         api.air(h),
         api.trafficCongestion(h),
+        ...(wantHumid ? [api.humidity(h)] : []),
       ]);
       if (gen !== _livePulseGen) return;
 
+      const envR = settled[0];
+      const airR = settled[1];
+      const congR = settled[2];
+      const humidR = wantHumid ? settled[3] : null;
+
       set((s) => {
-        const next: Partial<State> = { layerSyncAt: Date.now() };
+        const next: Partial<State> = {
+          layerSyncAt: Date.now(),
+          layerSyncEpoch: s.layerSyncEpoch + 1,
+          layerSyncHour: h,
+        };
         if (envR.status === "fulfilled") next.env = envR.value;
         if (airR.status === "fulfilled" && isValidAirRaster(airR.value)) next.airRaster = airR.value;
         if (congR.status === "fulfilled") {
           next.congestion = congR.value;
           next.congestionSeq = s.congestionSeq + 1;
         }
+        if (humidR && humidR.status === "fulfilled") next.humidityRaster = humidR.value as HumidityRaster;
         return next;
       });
     } catch {
@@ -959,98 +974,99 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  refreshAllLayers: async (hourOverride?, opts?: { forceEnv?: boolean; includeHeat?: boolean }) => {
+  refreshOverlayLayers: async (hourOverride?, opts?: { forceEnv?: boolean }) => {
     const h = snapUAEHour(hourOverride ?? get().hour);
-    set({ hour: h });
-    _layerSyncPending = { h, opts };
+    _overlayPending = { h, forceEnv: opts?.forceEnv };
 
-    if (_layerSyncInflight) return _layerSyncInflight;
+    if (_overlayInflight) return _overlayInflight;
 
-    _layerSyncInflight = (async () => {
+    _overlayInflight = (async () => {
       try {
-        while (_layerSyncPending) {
-          const job = _layerSyncPending;
-          _layerSyncPending = null;
+        while (_overlayPending) {
+          const job = _overlayPending;
+          _overlayPending = null;
           const syncH = job.h;
-          const syncOpts = job.opts;
-          const gen = ++_layerSyncGen;
+          const gen = ++_overlayGen;
+
+          const apply = (patch: Partial<State>) => {
+            if (gen !== _overlayGen) return;
+            set(patch);
+            bumpOverlaySync(set, syncH);
+          };
+
+          const tasks: Promise<void>[] = [
+            api
+              .environment(syncH, job.forceEnv ?? false)
+              .then((env) => apply({ env }))
+              .catch(() => {}),
+            api
+              .comfort(syncH)
+              .then((comfort) =>
+                apply({
+                  comfort,
+                  solarPreview: { azimuth: comfort.azimuth, elevation: comfort.elevation },
+                }),
+              )
+              .catch(() => {}),
+            api
+              .air(syncH)
+              .then((air) => {
+                if (isValidAirRaster(air)) apply({ airRaster: air });
+              })
+              .catch(() => {}),
+            api
+              .humidity(syncH)
+              .then((humidityRaster) => apply({ humidityRaster }))
+              .catch(() => {}),
+            api
+              .trafficCongestion(syncH)
+              .then((congestion) => {
+                if (gen !== _overlayGen) return;
+                set((s) => ({ congestion, congestionSeq: s.congestionSeq + 1 }));
+                bumpOverlaySync(set, syncH);
+              })
+              .catch(() => {}),
+          ];
 
           const s = get();
-          const fetchHeat =
-            !!syncOpts?.includeHeat && (s.layers.worstSegments || s.mode === "simulate");
-
-          const settled = await Promise.allSettled([
-            api.environment(syncH, syncOpts?.forceEnv ?? false),
-            api.comfort(syncH),
-            api.humidity(syncH),
-            api.wind(syncH),
-            api.airlocks(),
-            api.air(syncH),
-            api.trafficCongestion(syncH),
-          ]);
-
-          if (_layerSyncPending) {
-            continue;
-          }
-          if (gen !== _layerSyncGen) continue;
-
-          const envR = settled[0];
-          const comfortR = settled[1];
-          const humidR = settled[2];
-          const windR = settled[3];
-          const locksR = settled[4];
-          const airR = settled[5];
-          const congR = settled[6];
-
-          set((st) => {
-            const next: Partial<State> = {};
-            if (envR.status === "fulfilled") next.env = envR.value as EnvSnapshot;
-            if (comfortR.status === "fulfilled") {
-              next.comfort = comfortR.value as ComfortRaster;
-              next.solarPreview = {
-                azimuth: (comfortR.value as ComfortRaster).azimuth,
-                elevation: (comfortR.value as ComfortRaster).elevation,
-              };
-            }
-            if (humidR.status === "fulfilled") next.humidityRaster = humidR.value as HumidityRaster;
-            if (windR.status === "fulfilled") next.windRaster = windR.value as WindRaster;
-            if (locksR.status === "fulfilled") {
-              next.airlockGates = (locksR.value as { gates?: State["airlockGates"] }).gates ?? [];
-            }
-            if (airR.status === "fulfilled" && isValidAirRaster(airR.value)) next.airRaster = airR.value;
-            if (congR.status === "fulfilled") {
-              next.congestion = congR.value as Record<string, number>;
-              next.congestionSeq = st.congestionSeq + 1;
-            }
-            return next;
-          });
-
-          if (fetchHeat) {
-            const worstN = s.mode === "simulate" ? 200 : 25;
-            void api
-              .heatExposure(syncH, worstN)
-              .then((he) => set({ heatExposure: he }))
-              .catch(() => {});
+          if (s.layers.wind) {
+            tasks.push(
+              api
+                .wind(syncH)
+                .then((windRaster) => apply({ windRaster }))
+                .catch(() => {}),
+            );
           }
 
-          if (congR.status === "fulfilled") {
-            const now = Date.now();
-            if (now - _lastTrafficProvRefresh > 25_000) {
-              _lastTrafficProvRefresh = now;
-              void get().refreshProvenance();
-            }
-          }
+          await Promise.allSettled(tasks);
 
-          markLayerSynced(set, syncH);
-          if (syncOpts?.forceEnv) void get().refreshProvenance();
+          if (gen !== _overlayGen) continue;
+
+          const now = Date.now();
+          if (now - _lastTrafficProvRefresh > 25_000) {
+            _lastTrafficProvRefresh = now;
+            void get().refreshProvenance();
+          }
+          if (job.forceEnv) void get().refreshProvenance();
         }
       } finally {
-        _layerSyncInflight = null;
-        if (_layerSyncPending) void get().refreshAllLayers();
+        _overlayInflight = null;
+        if (_overlayPending) void get().refreshOverlayLayers();
       }
     })();
 
-    return _layerSyncInflight;
+    return _overlayInflight;
+  },
+
+  refreshAllLayers: async (hourOverride?, opts?: { forceEnv?: boolean; includeHeat?: boolean }) => {
+    await get().refreshOverlayLayers(hourOverride, { forceEnv: opts?.forceEnv });
+    try {
+      const airlocks = await api.airlocks();
+      set({ airlockGates: airlocks.gates ?? [] });
+    } catch {
+      /* optional */
+    }
+    if (opts?.includeHeat) void get().computeHeatExposure();
   },
 
   setDepartureHour: async (h, opts) => {
@@ -1241,7 +1257,7 @@ export const useStore = create<State>((set, get) => ({
 
   refreshEnvironment: async (force = false) => {
     try {
-      await get().refreshAllLayers(get().hour, { forceEnv: force });
+      await get().refreshOverlayLayers(get().hour, { forceEnv: force });
     } catch {
       /* non-fatal */
     }
@@ -1257,7 +1273,8 @@ export const useStore = create<State>((set, get) => ({
   },
 
   refreshHour: async (h) => {
-    await get().refreshAllLayers(h, { includeHeat: true });
+    await get().refreshOverlayLayers(h);
+    void get().computeHeatExposure();
   },
 
   refreshAir: async (hourOverride?) => {
