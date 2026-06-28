@@ -10,6 +10,7 @@ export const ROUTE_INTENT: Record<string, string> = {
   "Cleanest Air": "Lowest inhaled PM2.5",
   "Cool Refuge": "AC / shade stops along route",
   "Park & Walk Cool": "Drive + shaded walk",
+  "Safest (P95)": "Worst case heat & air (95th percentile)",
 };
 
 export function partitionRouteOptions(options: RouteOption[]) {

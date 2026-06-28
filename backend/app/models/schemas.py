@@ -179,11 +179,16 @@ class ExposureForecastSlot(BaseModel):
     total_min: float
     delta_vs_now: ForecastDelta = Field(default_factory=ForecastDelta)
     timeline: list[dict] = Field(default_factory=list)
+    peak_utci_p50: float | None = None
+    peak_utci_p95: float | None = None
+    mean_utci_p95: float | None = None
+    confidence_pct: float | None = None
 
 
 class ExposureForecastRequest(ExposureTimelineRequest):
     forecast_minutes: int = Field(default=60, ge=15, le=120)
     step_minutes: int = Field(default=10, ge=5, le=30)
+    ensemble: bool = Field(default=True, description="Attach P50/P95 uncertainty bands")
 
 
 class ExposureForecastResponse(BaseModel):
@@ -192,9 +197,31 @@ class ExposureForecastResponse(BaseModel):
     forecast_minutes: int
     step_minutes: int
     assimilated: bool = True
-    model: str = "world_model_v1"
+    model: str = "world_model_v2_ensemble"
     slots: list[ExposureForecastSlot]
     realtime: RouteRealtimeMeta | None = None
+
+
+class RouteRiskOption(BaseModel):
+    label: str
+    avg_utci_p50: float
+    avg_utci_p95: float
+    peak_utci_p95: float
+    inhaled_pm25_p95: float
+    confidence_pct: float
+    duration_min: float | None = None
+    shade_pct: float | None = None
+
+
+class RouteRiskRequest(RouteRequest):
+    label: str | None = Field(default=None, description="Optional single route label filter")
+
+
+class RouteRiskResponse(BaseModel):
+    hour: float
+    profile: str
+    temp_spread_c: float = 0.0
+    options: list[RouteRiskOption]
 
 
 class BestDepartureSlot(BaseModel):

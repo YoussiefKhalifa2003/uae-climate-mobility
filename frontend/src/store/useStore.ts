@@ -423,6 +423,7 @@ export const useStore = create<State>((set, get) => ({
           label: opt.label,
           forecast_minutes: 60,
           step_minutes: 10,
+          ensemble: true,
           live: true,
           include_horizon: true,
           include_multimodal: false,

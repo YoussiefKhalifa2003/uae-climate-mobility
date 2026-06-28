@@ -86,6 +86,11 @@ export interface ExposureTimelineFrame {
   band: string;
   overlap_score: number;
   intersection: boolean;
+  utci_p50?: number;
+  utci_p95?: number;
+  utci_p05?: number;
+  pm25_p95?: number;
+  band_width_c?: number;
 }
 
 export interface ExposureIntersection {
@@ -119,6 +124,10 @@ export interface ExposureForecastSlot {
   total_min: number;
   delta_vs_now: ForecastDelta;
   timeline: ExposureTimelineFrame[];
+  peak_utci_p50?: number;
+  peak_utci_p95?: number;
+  mean_utci_p95?: number;
+  confidence_pct?: number;
 }
 
 export interface ExposureForecast {
@@ -130,6 +139,24 @@ export interface ExposureForecast {
   model: string;
   slots: ExposureForecastSlot[];
   realtime?: RouteRealtimeMeta;
+}
+
+export interface RouteRiskOption {
+  label: string;
+  avg_utci_p50: number;
+  avg_utci_p95: number;
+  peak_utci_p95: number;
+  inhaled_pm25_p95: number;
+  confidence_pct: number;
+  duration_min?: number;
+  shade_pct?: number;
+}
+
+export interface RouteRiskResponse {
+  hour: number;
+  profile: string;
+  temp_spread_c: number;
+  options: RouteRiskOption[];
 }
 
 export interface RouteOption {
@@ -321,9 +348,11 @@ export const api = {
   exposureTimeline: (body: RouteRequestBody & { label: string }, opts?: { signal?: AbortSignal }) =>
     post<{ label: string; thermal_horizon: ThermalHorizon | null }>("/api/exposure-timeline", body, opts),
   exposureForecast: (
-    body: RouteRequestBody & { label: string; forecast_minutes?: number; step_minutes?: number },
+    body: RouteRequestBody & { label: string; forecast_minutes?: number; step_minutes?: number; ensemble?: boolean },
     opts?: { signal?: AbortSignal; timeoutMs?: number },
   ) => post<ExposureForecast>("/api/exposure-forecast", body, opts),
+  routeRisk: (body: RouteRequestBody & { label?: string }) =>
+    post<RouteRiskResponse>("/api/route-risk", body),
   bestDeparture: (body: any) => post<BestDeparture>("/api/best-departure", body),
   isochrone: (body: any) => post<GeoJSON.FeatureCollection>("/api/isochrone", body),
   heatExposure: (hour: number) => get<HeatExposure>(`/api/heat-exposure?hour=${hour}`),

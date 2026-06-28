@@ -30,6 +30,8 @@ from app.models.schemas import (
     IsochroneRequest,
     RouteRequest,
     RouteResponse,
+    RouteRiskRequest,
+    RouteRiskResponse,
     WhatIfRequest,
 )
 
@@ -138,13 +140,13 @@ def status():
 @app.get("/api/health")
 def health(response: Response):
     if not _require_ready(response):
-        return {"ready": False, "api_features": ["exposure_forecast", "exposure_timeline"]}
+        return {"ready": False, "api_features": ["exposure_forecast", "exposure_timeline", "route_risk"]}
     return {
         "status": "ok",
         "compute": compute.backend_info(),
         "sector": geo_engine.sector_meta(),
-        "api_version": "world_model_v1",
-        "api_features": ["exposure_forecast", "exposure_timeline"],
+        "api_version": "world_model_v2",
+        "api_features": ["exposure_forecast", "exposure_timeline", "route_risk"],
     }
 
 
@@ -297,6 +299,21 @@ def exposure_timeline(req: ExposureTimelineRequest, response: Response):
     return result
 
 
+@app.post("/api/route-risk", response_model=RouteRiskResponse)
+def route_risk(req: RouteRiskRequest, response: Response):
+    """Probabilistic P50/P95 exposure risk + confidence per route option."""
+    if not _require_ready(response):
+        return {"hour": req.hour, "profile": req.profile.value, "temp_spread_c": 0, "options": []}
+    return router_engine.route_risk(
+        origin=req.origin.model_dump(),
+        destination=req.destination.model_dump(),
+        mode=req.mode.value,
+        profile=req.profile.value,
+        hour=req.hour,
+        label=req.label,
+    )
+
+
 @app.post("/api/exposure-forecast", response_model=ExposureForecastResponse)
 def exposure_forecast(req: ExposureForecastRequest, response: Response):
     """World-model roll-forward: exposure if departure is delayed 0–N minutes."""
@@ -331,7 +348,7 @@ def exposure_forecast(req: ExposureForecastRequest, response: Response):
     provenance_mod.set_source(
         "exposure_forecast",
         "Exposure world model",
-        "world_model_v1 + open-meteo-hourly",
+        "world_model_v2_ensemble + open-meteo-hourly",
         True,
         f"{len(result.get('slots', []))} slots · {req.forecast_minutes} min horizon",
     )

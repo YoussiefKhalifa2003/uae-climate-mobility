@@ -94,6 +94,12 @@ function ForecastSection({
             </span>
             <span>+60 min</span>
           </div>
+          {forecastSlot?.confidence_pct != null && (
+            <p className="mt-1.5 rounded-md bg-violet-950/50 px-2 py-1 text-[10px] text-violet-200">
+              {forecastSlot.confidence_pct >= 70 ? "✓" : "⚠"} {forecastSlot.confidence_pct.toFixed(0)}% confidence
+              trip stays under heat threshold (P95 envelope)
+            </p>
+          )}
           {forecastSlot && forecastDelayMin > 0 && (
             <p className="mt-1.5 text-[10px] text-slate-300">
               vs leaving now:{" "}
@@ -335,6 +341,20 @@ export default function UrbanXRay() {
                 onChange={(e) => store.setTripMinute(parseFloat(e.target.value))}
                 className="w-full accent-emerald-500"
               />
+              {frame?.utci_p95 != null && (
+                <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-400">
+                  <span>P50–P95 UTCI</span>
+                  <div className="relative h-1.5 flex-1 rounded-full bg-panel2">
+                    <div
+                      className="absolute h-full rounded-full bg-gradient-to-r from-emerald-400/80 to-red-400/80"
+                      style={{ left: "10%", right: "10%" }}
+                    />
+                  </div>
+                  <span className="font-mono text-slate-300">
+                    {frame.utci.toFixed(0)}–{frame.utci_p95.toFixed(0)}°C
+                  </span>
+                </div>
+              )}
 
               {bestDeparture && (
                 <button

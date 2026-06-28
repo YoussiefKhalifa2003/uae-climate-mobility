@@ -38,7 +38,7 @@ export default function TopBar() {
             <h1 className="text-sm font-semibold tracking-wide text-white">
               UAE Climate Mobility
             </h1>
-            <p className="text-[10px] text-violet-300/90">Exposure Engine · World Model v1</p>
+            <p className="text-[10px] text-violet-300/90">Exposure Engine · World Model v2</p>
           </div>
         </div>
         <p className="mt-0.5 text-[11px] text-slate-400">

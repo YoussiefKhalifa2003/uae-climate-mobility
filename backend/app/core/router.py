@@ -115,6 +115,8 @@ PRESETS = {
                  "description": "Sensible blend of speed, heat and air."},
     "Refuge": {"label": "Cool Refuge", "color": [244, 114, 182, 235], "shade": 1.6, "heat": 1.8, "air": 0.6, "refuge": 2.5,
                "description": "Hops between air-conditioned oases with cooling breaks."},
+    "SafestP95": {"label": "Safest (P95)", "color": [167, 139, 250, 235], "shade": 2.2, "heat": 3.0, "air": 2.2, "refuge": 1.0,
+                  "description": "Optimised for worst-case heat & air (95th percentile forecast)."},
 }
 
 MULTIMODAL_PRESET = {
@@ -660,6 +662,9 @@ def route(
     graph = gd.graphs.get(mode) or next(iter(gd.graphs.values()))
     enrich = enrich_edges(hour)
     prof = _prof_with_name(profile)
+    from app.data.adapters import get_environment, get_env_scenarios
+
+    env_p50 = get_environment(hour, force_refresh=False)
 
     ox, oy = _to_utm(origin["lat"], origin["lon"])
     dx, dy = _to_utm(destination["lat"], destination["lon"])
@@ -669,13 +674,32 @@ def route(
 
     options = []
     for name, preset in PRESETS.items():
+        edge_enrich = enrich
+        if name == "SafestP95":
+            scen = get_env_scenarios(hour)
+            solar_comfort.compute_hour(hour, scen["p95"])
+            from app.core import air_quality
+
+            air_quality.compute_field(scen["p95"])
+            edge_enrich = enrich_edges(hour)
         try:
-            wfn = _weight_fn(enrich, prof, preset)
+            wfn = _weight_fn(edge_enrich, prof, preset)
             path = nx.shortest_path(graph, src, dst, weight=wfn)
         except Exception as exc:  # noqa: BLE001
             logger.info("route '%s' failed: %s", name, exc)
+            if name == "SafestP95":
+                solar_comfort.compute_hour(hour, env_p50)
+                from app.core import air_quality
+
+                air_quality.compute_field(env_p50)
             continue
-        result = _metrics(graph, path, enrich, mode, prof)
+        if name == "SafestP95":
+            solar_comfort.compute_hour(hour, env_p50)
+            from app.core import air_quality
+
+            air_quality.compute_field(env_p50)
+
+        result = _metrics(graph, path, edge_enrich, mode, prof)
         refuges = _nearby_refuges([(graph.nodes[n]["x"], graph.nodes[n]["y"]) for n in path]) if name == "Refuge" else []
         result["metrics"]["refuge_stops"] = len(refuges)
 
@@ -879,6 +903,8 @@ def exposure_forecast_for_label(
         path_coords_fn=_path_coords,
         edge_attr_fn=_edge_attr_along,
         enrich_fn=enrich_edges,
+        ensemble=True,
+        profile_name=profile,
     )
 
     return {
@@ -886,6 +912,72 @@ def exposure_forecast_for_label(
         **forecast,
         "realtime": _realtime_meta(base_hour),
     }
+
+
+def route_risk(
+    origin,
+    destination,
+    mode: str,
+    profile: str,
+    hour: float,
+    *,
+    label: str | None = None,
+) -> dict:
+    """Probabilistic exposure summary (P50/P95 + confidence) for route options."""
+    from app.core.climate_intelligence import _PROFILE_THRESHOLDS
+    from app.data.adapters import get_env_scenarios
+
+    res = route(
+        origin,
+        destination,
+        mode,
+        profile,
+        hour,
+        live=True,
+        include_horizon=False,
+        include_multimodal=False,
+    )
+    thresholds = _PROFILE_THRESHOLDS.get(profile, _PROFILE_THRESHOLDS["default"])
+    scen = get_env_scenarios(hour)
+    dt = float(scen["p95"]["air_temp_c"]) - float(scen["p50"]["air_temp_c"])
+    pm_ratio = float(scen["p95"].get("pm25_ug_m3") or 40) / max(
+        float(scen["p50"].get("pm25_ug_m3") or 35), 1.0
+    )
+
+    options = []
+    for opt in res.get("options", []):
+        if label and opt["label"] != label:
+            continue
+        m = opt["metrics"]
+        avg_p50 = float(m.get("avg_utci_c", 35))
+        shade = float(m.get("shade_pct", 0)) / 100.0
+        slope = 0.85 * (1.0 - shade) + 0.28 * shade
+        avg_p95 = avg_p50 + slope * dt
+        peak_p95 = avg_p95 + max(0.0, (100.0 - float(m.get("heat_risk_score", 50))) / 100.0 * 4.0)
+        warn = thresholds["warn"]
+        critical = thresholds["critical"]
+        confidence = 100.0
+        if peak_p95 >= critical:
+            confidence = 25.0
+        elif peak_p95 >= warn:
+            confidence = max(35.0, 100.0 - (peak_p95 - warn) / max(critical - warn, 1) * 65.0)
+        else:
+            confidence = min(100.0, 88.0 + shade * 10.0)
+
+        options.append(
+            {
+                "label": opt["label"],
+                "avg_utci_p50": round(avg_p50, 1),
+                "avg_utci_p95": round(avg_p95, 1),
+                "peak_utci_p95": round(peak_p95, 1),
+                "inhaled_pm25_p95": round(float(m.get("inhaled_pm25_ug", 0)) * pm_ratio, 1),
+                "confidence_pct": round(confidence, 1),
+                "duration_min": m.get("duration_min"),
+                "shade_pct": m.get("shade_pct"),
+            }
+        )
+
+    return {"hour": hour, "profile": profile, "temp_spread_c": scen.get("temp_spread_c", 0), "options": options}
 
 
 def best_departure(origin, destination, mode: str = "walk", profile: str = "default") -> dict:

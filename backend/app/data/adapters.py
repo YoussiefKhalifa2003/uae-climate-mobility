@@ -337,6 +337,38 @@ def get_environment(hour: float = 14.0, force_refresh: bool = False) -> dict:
     return snap
 
 
+def get_env_scenarios(hour: float, force_refresh: bool = False) -> dict[str, dict]:
+    """Central (P50) and stress (P95/P05) env scenarios from hourly forecast spread."""
+    p50 = get_environment(hour, force_refresh=force_refresh)
+    h_lo = get_environment((hour - 0.5) % 24.0, force_refresh=False)
+    h_hi = get_environment((hour + 0.5) % 24.0, force_refresh=False)
+
+    temps = [float(p50["air_temp_c"]), float(h_lo["air_temp_c"]), float(h_hi["air_temp_c"])]
+    temp_spread = max(temps) - min(temps)
+    temp_bump = max(1.2, temp_spread * 1.35)
+
+    pm50 = float(p50.get("pm25_ug_m3") or 38.0)
+    pm_vals = [pm50, float(h_lo.get("pm25_ug_m3") or pm50), float(h_hi.get("pm25_ug_m3") or pm50)]
+    pm_bump = max(pm50 * 0.18, (max(pm_vals) - min(pm_vals)) * 1.4)
+
+    p95 = dict(p50)
+    p95["air_temp_c"] = round(float(p50["air_temp_c"]) + temp_bump, 1)
+    p95["relative_humidity"] = min(98.0, float(p50["relative_humidity"]) + 4.0)
+    p95["wind_speed_ms"] = max(0.5, float(p50["wind_speed_ms"]) * 0.82)
+    p95["pm25_ug_m3"] = round(pm50 + pm_bump, 1)
+    if p95.get("aqi") is not None:
+        from app.core.air_quality import pm25_to_aqi
+
+        p95["aqi"] = pm25_to_aqi(p95["pm25_ug_m3"])
+
+    p05 = dict(p50)
+    p05["air_temp_c"] = round(float(p50["air_temp_c"]) - temp_bump * 0.55, 1)
+    p05["relative_humidity"] = max(5.0, float(p50["relative_humidity"]) - 3.0)
+    p05["pm25_ug_m3"] = round(max(5.0, pm50 - pm_bump * 0.6), 1)
+
+    return {"p50": p50, "p95": p95, "p05": p05, "temp_spread_c": round(temp_spread, 2)}
+
+
 def live_station_snapshot() -> dict:
     """Single live monitoring point at sector center for map markers."""
     env = get_environment()

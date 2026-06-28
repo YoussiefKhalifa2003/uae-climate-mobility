@@ -11,8 +11,9 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.core import air_quality, solar_comfort
-from app.core.climate_intelligence import thermal_horizon
-from app.data.adapters import get_environment
+from app.core.climate_intelligence import _PROFILE_THRESHOLDS, thermal_horizon
+from app.core.exposure_ensemble import attach_timeline_bands, slot_band_summary
+from app.data.adapters import get_environment, get_env_scenarios
 
 
 def current_uae_hour() -> float:
@@ -60,6 +61,8 @@ def build_forecast(
     path_coords_fn,
     edge_attr_fn,
     enrich_fn,
+    ensemble: bool = True,
+    profile_name: str = "default",
 ) -> dict:
     """Roll exposure forward for delayed departures using hour-matched live env."""
     base = base_hour if base_hour is not None else current_uae_hour()
@@ -75,9 +78,12 @@ def build_forecast(
     slots: list[dict] = []
     baseline_summary: dict | None = None
 
+    thresholds = _PROFILE_THRESHOLDS.get(profile_name, _PROFILE_THRESHOLDS["default"])
+
     for delay in delays:
         dep_hour = (base + delay / 60.0) % 24.0
         env = get_environment(dep_hour, force_refresh=False)
+        scenarios = get_env_scenarios(dep_hour) if ensemble else None
 
         solar_comfort.compute_hour(dep_hour, env)
         air_quality.compute_field(env)
@@ -96,7 +102,22 @@ def build_forecast(
             enrich=enrich,
         )
 
-        summary = _slot_summary(horizon)
+        timeline = horizon["timeline"]
+        band_summary: dict = {}
+        if ensemble and scenarios:
+            timeline = attach_timeline_bands(
+                timeline,
+                scenarios["p50"],
+                scenarios["p95"],
+                warn_utci=thresholds["warn"],
+            )
+            band_summary = slot_band_summary(
+                timeline,
+                warn_utci=thresholds["warn"],
+                critical_utci=thresholds["critical"],
+            )
+
+        summary = _slot_summary({**horizon, "timeline": timeline})
         slot: dict = {
             "delay_minutes": delay,
             "departure_hour": round(dep_hour, 3),
@@ -113,7 +134,8 @@ def build_forecast(
             **summary,
             "peak_at_min": horizon["peak_at_min"],
             "total_min": horizon["total_min"],
-            "timeline": horizon["timeline"],
+            "timeline": timeline,
+            **band_summary,
         }
 
         if delay == 0:
@@ -134,5 +156,5 @@ def build_forecast(
         "step_minutes": step_minutes,
         "slots": slots,
         "assimilated": True,
-        "model": "world_model_v1",
+        "model": "world_model_v2_ensemble" if ensemble else "world_model_v1",
     }
